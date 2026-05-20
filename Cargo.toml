@@ -1,0 +1,59 @@
+[package]
+name = "brain-eval"
+version = "1.0.0"
+edition = "2021"
+rust-version = "1.95"
+license = "Apache-2.0"
+repository = "https://github.com/brain-db-io/brain-eval"
+description = "Evaluation, benchmarking, and report generation for Brain — the cognitive substrate for AI agents."
+
+[features]
+default = []
+# Enables LLM-as-judge evaluation. Off by default — real LLM calls
+# cost money and require live API keys. `cargo test --features live-llm`
+# opts in; the runner falls back to the heuristic judge otherwise.
+live-llm = []
+
+# ----------------------------------------------------------------------------
+# Dependencies on the substrate crates
+#
+# Today: relative paths to a `brain` checkout that sits next to the
+# `brain-db-io` org folder — i.e. `../../brain/crates/brain-*` from
+# this manifest. Layout assumed:
+#
+#   ~/Desktop/
+#   ├── brain/                       # the substrate source tree
+#   └── brain-db-io/
+#       └── brain-eval/              # ← this repo
+#
+# Anyone cloning brain-eval needs the brain repo checked out at
+# `../../brain` relative to this Cargo.toml.
+#
+# When `brain-db-io/brain` is published publicly, swap to git deps and
+# add a `[patch."https://github.com/brain-db-io/brain"]` block at the
+# bottom of this file that redirects to the local paths during dev:
+#
+#   brain-core     = { git = "https://github.com/brain-db-io/brain", branch = "main" }
+#   brain-protocol = { git = "https://github.com/brain-db-io/brain", branch = "main" }
+#   brain-sdk-rust = { git = "https://github.com/brain-db-io/brain", branch = "main" }
+#
+#   [patch."https://github.com/brain-db-io/brain"]
+#   brain-core     = { path = "../../brain/crates/brain-core" }
+#   brain-protocol = { path = "../../brain/crates/brain-protocol" }
+#   brain-sdk-rust = { path = "../../brain/crates/brain-sdk-rust" }
+# ----------------------------------------------------------------------------
+
+[dependencies]
+brain-core     = { path = "../../brain/crates/brain-core" }
+brain-protocol = { path = "../../brain/crates/brain-protocol" }
+brain-sdk-rust = { path = "../../brain/crates/brain-sdk-rust" }
+
+tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "macros", "signal", "time", "sync"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1.7", features = ["v7", "serde"] }
+thiserror = "1"
+tracing = "0.1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "test-util"] }

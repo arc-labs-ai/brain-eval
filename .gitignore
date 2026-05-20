@@ -1,0 +1,29 @@
+# Rust build artifacts
+/target
+**/*.rs.bk
+*.pdb
+
+# Cargo lockfile — this crate produces a binary (the `run_longmemeval`
+# and `validate_pipeline` examples), so committing Cargo.lock is the
+# right call. Override here only if upstream pinning becomes painful.
+# /Cargo.lock
+
+# IDE / editor noise
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS noise
+.DS_Store
+Thumbs.db
+
+# Eval-side outputs
+/eval-reports/
+/target/eval-reports/
+/.brain-eval-datasets/
+*.log
+
+# Local scratch
+/scratch/

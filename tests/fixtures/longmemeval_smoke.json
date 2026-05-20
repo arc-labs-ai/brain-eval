@@ -1,0 +1,97 @@
+[
+  {
+    "question_id": "smoke-001",
+    "question_type": "single-session-user",
+    "question": "What city does the user live in?",
+    "answer": "Berlin",
+    "haystack_sessions": [
+      {
+        "session_id": "s-1",
+        "session_date": "2024-02-15",
+        "turns": [
+          {"role": "user", "content": "I moved to Berlin last month."},
+          {"role": "assistant", "content": "Welcome to Berlin! How are you finding it?"}
+        ]
+      }
+    ],
+    "answer_session_ids": ["s-1"]
+  },
+  {
+    "question_id": "smoke-002",
+    "question_type": "single-session-preference",
+    "question": "What is the user's favourite cuisine?",
+    "answer": "Thai",
+    "haystack_sessions": [
+      {
+        "session_id": "s-2",
+        "turns": [
+          {"role": "user", "content": "I absolutely love Thai food, especially pad see ew."},
+          {"role": "assistant", "content": "Have you tried making it at home?"}
+        ]
+      }
+    ],
+    "answer_session_ids": ["s-2"]
+  },
+  {
+    "question_id": "smoke-003",
+    "question_type": "multi-session",
+    "question": "What is the name of the user's project?",
+    "answer": "auth-rewrite",
+    "haystack_sessions": [
+      {
+        "session_id": "s-3a",
+        "turns": [
+          {"role": "user", "content": "I started a new project this week."},
+          {"role": "assistant", "content": "What's it about?"}
+        ]
+      },
+      {
+        "session_id": "s-3b",
+        "turns": [
+          {"role": "user", "content": "We named the auth-rewrite project after the team voted."},
+          {"role": "assistant", "content": "Got it."}
+        ]
+      }
+    ],
+    "answer_session_ids": ["s-3a", "s-3b"]
+  },
+  {
+    "question_id": "smoke-004",
+    "question_type": "knowledge-update",
+    "question": "Where does the user work now?",
+    "answer": "Stripe",
+    "haystack_sessions": [
+      {
+        "session_id": "s-4a",
+        "turns": [
+          {"role": "user", "content": "I work at Shopify."},
+          {"role": "assistant", "content": "Nice."}
+        ]
+      },
+      {
+        "session_id": "s-4b",
+        "turns": [
+          {"role": "user", "content": "I just joined Stripe last Monday."},
+          {"role": "assistant", "content": "Congrats on the move."}
+        ]
+      }
+    ],
+    "answer_session_ids": ["s-4b"]
+  },
+  {
+    "question_id": "smoke-005",
+    "question_type": "abstention",
+    "question": "What is the user's phone number?",
+    "answer": "",
+    "haystack_sessions": [
+      {
+        "session_id": "s-5",
+        "turns": [
+          {"role": "user", "content": "Today I went hiking."},
+          {"role": "assistant", "content": "How was it?"}
+        ]
+      }
+    ],
+    "answer_session_ids": []
+  }
+]
