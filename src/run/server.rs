@@ -55,6 +55,12 @@ pub struct DockerServerOpts {
     pub embed_model_dir: String,
     /// Per-shard arena size (env `BRAIN__SHARD__ARENA_CAPACITY_BYTES`).
     pub arena_capacity: String,
+    /// Named docker volume to mount at the server's data dir
+    /// (`/var/lib/brain/data`). `None` = ephemeral (data dies with the
+    /// container). `Some(name)` persists across container restarts —
+    /// required for restart-recovery scenarios. Remove it with
+    /// [`remove_volume`].
+    pub data_volume: Option<String>,
     /// How long to wait for the container's healthcheck to go `healthy`.
     pub health_timeout: Duration,
 }
@@ -69,9 +75,16 @@ impl Default for DockerServerOpts {
             metrics_port: 19091,
             embed_model_dir: format!("{home}/.local/share/brain/models/bge-small-en-v1.5"),
             arena_capacity: "256MiB".to_string(),
+            data_volume: None,
             health_timeout: Duration::from_secs(120),
         }
     }
+}
+
+/// Remove a named docker volume (best-effort). Use after the last
+/// container on it is gone to clean up a restart-recovery scenario.
+pub async fn remove_volume(volume: &str) {
+    let _ = run_docker(&["volume", "rm", "-f", volume]).await;
 }
 
 /// Errors from booting or probing a docker-backed server.
@@ -111,8 +124,13 @@ impl ServerHandle {
         );
         let arena_env = format!("BRAIN__SHARD__ARENA_CAPACITY_BYTES={}", opts.arena_capacity);
         let image = format!("brain:{}", opts.image_tag);
+        // Optional persistent data volume (for restart-recovery).
+        let data_mount = opts
+            .data_volume
+            .as_ref()
+            .map(|v| format!("{v}:/var/lib/brain/data"));
 
-        let args = [
+        let mut args: Vec<&str> = vec![
             "run",
             "-d",
             "--name",
@@ -127,6 +145,12 @@ impl ServerHandle {
             &metrics_map,
             "-v",
             &model_mount,
+        ];
+        if let Some(mount) = data_mount.as_deref() {
+            args.push("-v");
+            args.push(mount);
+        }
+        args.extend_from_slice(&[
             "-e",
             "BRAIN_EMBED_MODEL_DIR=/models/bge-small-en-v1.5",
             "-e",
@@ -141,7 +165,7 @@ impl ServerHandle {
             "-e",
             "BRAIN__EXTRACTORS__LLM__ENABLED=false",
             &image,
-        ];
+        ]);
         run_docker(&args).await?;
 
         let handle = Self {

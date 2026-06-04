@@ -21,6 +21,9 @@ use brain_db_sdk::{new_id, EncodeBuilder, ForgetBuilder, RecallBuilder};
 
 use crate::run::harness::{BrainEvalHarness, HarnessError};
 
+pub mod durability;
+pub use durability::restart_recovery;
+
 /// Pass/fail result of one scenario.
 #[derive(Debug, Clone)]
 pub struct ScenarioOutcome {

@@ -16,5 +16,5 @@ pub mod synthesize;
 pub use config::{ReporterKind, RunConfig};
 pub use harness::{BrainEvalHarness, HarnessError, IngestOutcome, RecallOutcome};
 pub use runner::{datasets_dir, EvalRunner};
-pub use server::{DockerServerOpts, ServerError, ServerHandle};
+pub use server::{remove_volume, DockerServerOpts, ServerError, ServerHandle};
 pub use synthesize::synthesize_answer;
