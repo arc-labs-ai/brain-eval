@@ -21,7 +21,9 @@ use brain_db_sdk::{BrainClient, EncodeBuilder, RecallBuilder};
 
 use crate::run::harness::HarnessError;
 
+pub mod recall;
 mod targets;
+pub use recall::{no_regression, run_recall_quality, RecallQualityReport, RecallTargets};
 pub use targets::{Targets, VerbTarget};
 
 /// What to run.
@@ -48,15 +50,22 @@ impl Default for ScaleConfig {
 /// Latency outcome for one verb, in milliseconds, against its target.
 #[derive(Debug, Clone)]
 pub struct LatencyResult {
+    /// The verb measured (`encode` / `recall`).
     pub verb: &'static str,
+    /// Number of timed samples.
     pub samples: usize,
+    /// Measured median latency.
     pub p50_ms: f64,
+    /// Measured 99th-percentile latency.
     pub p99_ms: f64,
+    /// Target median budget.
     pub target_p50_ms: f64,
+    /// Target 99th-percentile budget.
     pub target_p99_ms: f64,
 }
 
 impl LatencyResult {
+    /// True iff both p50 and p99 met their targets.
     #[must_use]
     pub fn pass(&self) -> bool {
         self.p50_ms <= self.target_p50_ms && self.p99_ms <= self.target_p99_ms
@@ -66,13 +75,18 @@ impl LatencyResult {
 /// Sustained-throughput outcome for one verb, in ops/second.
 #[derive(Debug, Clone)]
 pub struct ThroughputResult {
+    /// The verb measured (`encode` / `recall`).
     pub verb: &'static str,
+    /// Number of ops in the measured window.
     pub ops: usize,
+    /// Measured sustained ops/second.
     pub ops_per_sec: f64,
+    /// Target ops/second floor.
     pub target_ops_per_sec: f64,
 }
 
 impl ThroughputResult {
+    /// True iff measured throughput met or exceeded the floor.
     #[must_use]
     pub fn pass(&self) -> bool {
         self.ops_per_sec >= self.target_ops_per_sec
@@ -84,7 +98,9 @@ impl ThroughputResult {
 pub struct ScaleReport {
     /// Memories successfully ingested before probing.
     pub ingested: usize,
+    /// Per-verb latency results.
     pub latency: Vec<LatencyResult>,
+    /// Per-verb throughput results.
     pub throughput: Vec<ThroughputResult>,
 }
 

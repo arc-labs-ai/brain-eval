@@ -12,7 +12,6 @@ pub struct JsonReporter;
 impl Reporter for JsonReporter {
     fn write(&self, report: &BenchmarkReport, path: &Path) -> std::io::Result<()> {
         let file = File::create(path)?;
-        serde_json::to_writer_pretty(file, report)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+        serde_json::to_writer_pretty(file, report).map_err(std::io::Error::other)
     }
 }

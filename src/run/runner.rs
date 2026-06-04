@@ -158,6 +158,7 @@ impl EvalRunner {
         Ok(report)
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn run_question(
         &self,
         harness: &BrainEvalHarness,

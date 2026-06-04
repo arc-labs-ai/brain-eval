@@ -42,7 +42,7 @@ pub async fn restart_recovery(opts: DockerServerOpts) -> ScenarioOutcome {
 async fn run_restart_recovery(
     name: &'static str,
     opts: DockerServerOpts,
-    volume: &str,
+    _volume: &str,
 ) -> Result<ScenarioOutcome, String> {
     const N: usize = 25;
 

@@ -93,7 +93,12 @@ pub async fn remove_volume(volume: &str) {
 pub enum ServerError {
     /// A `docker` invocation failed to spawn or returned non-zero.
     #[error("docker {context}: {detail}")]
-    Docker { context: String, detail: String },
+    Docker {
+        /// The docker subcommand that failed (e.g. `run`, `inspect`).
+        context: String,
+        /// Stderr / spawn-error detail.
+        detail: String,
+    },
     /// The container never reached the `healthy` state in time.
     #[error("server did not become healthy within {0:?}")]
     HealthTimeout(Duration),

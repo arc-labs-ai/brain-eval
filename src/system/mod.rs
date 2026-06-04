@@ -27,7 +27,9 @@ pub use durability::restart_recovery;
 /// Pass/fail result of one scenario.
 #[derive(Debug, Clone)]
 pub struct ScenarioOutcome {
+    /// Scenario name.
     pub name: &'static str,
+    /// Whether the scenario passed.
     pub passed: bool,
     /// Human-readable explanation (why it passed / how it failed).
     pub detail: String,

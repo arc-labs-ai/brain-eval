@@ -262,12 +262,9 @@ mod tests {
     fn parses_jsonl_alternate() {
         let text = format!(
             "{}\n{}\n",
+            sample_row().replace([' ', '\n'], ""),
             sample_row()
-                .replace(' ', "")
-                .replace('\n', ""),
-            sample_row()
-                .replace(' ', "")
-                .replace('\n', "")
+                .replace([' ', '\n'], "")
                 .replacen("lme-001", "lme-002", 1),
         );
         let rows = parse_jsonl(&text, Path::new("test")).expect("parse");

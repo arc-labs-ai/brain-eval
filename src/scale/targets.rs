@@ -14,7 +14,9 @@
 /// A latency budget for one verb, in milliseconds.
 #[derive(Debug, Clone, Copy)]
 pub struct VerbTarget {
+    /// Median (p50) latency budget, milliseconds.
     pub p50_ms: f64,
+    /// 99th-percentile latency budget, milliseconds.
     pub p99_ms: f64,
 }
 

@@ -44,10 +44,12 @@
 #![warn(missing_docs)]
 #![allow(clippy::module_name_repetitions)]
 
+pub mod acceptance;
 pub mod core;
 pub mod datasets;
 pub mod report;
 pub mod run;
 pub mod scale;
 pub mod score;
+pub mod soak;
 pub mod system;

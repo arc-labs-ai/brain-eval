@@ -24,7 +24,9 @@ use brain_eval::report::{
     dmr_competitor_baselines, locomo_competitor_baselines, longmemeval_s_competitor_baselines,
     smoke_competitor_baselines, CompetitorBaselines,
 };
+use brain_eval::acceptance::{run_acceptance, AcceptanceConfig};
 use brain_eval::run::{EvalRunner, RunConfig};
+use brain_eval::soak::{run_soak, SoakConfig};
 
 const DEFAULT_ENDPOINT: &str = "127.0.0.1:9090";
 
@@ -51,6 +53,13 @@ async fn async_main() -> ExitCode {
 
     let benchmark_name = args[0].as_str();
     let endpoint_override = parse_endpoint_flag(&args[1..]);
+
+    // System commands that drive the server directly (not dataset evals).
+    match benchmark_name {
+        "acceptance" => return acceptance_cmd(resolve_endpoint(endpoint_override)).await,
+        "soak" => return soak_cmd(resolve_endpoint(endpoint_override)).await,
+        _ => {}
+    }
 
     // Resolve the benchmark + its competitor table.
     let (benchmark, competitors): (Box<dyn Benchmark>, CompetitorBaselines) = match benchmark_name {
@@ -101,6 +110,83 @@ async fn async_main() -> ExitCode {
         }
         Err(e) => {
             eprintln!("error: eval run failed: {e}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+/// Resolve the endpoint: explicit `--endpoint` flag, else
+/// `BRAIN_EVAL_ENDPOINT`, else the default.
+fn resolve_endpoint(override_: Option<SocketAddr>) -> SocketAddr {
+    override_
+        .or_else(|| {
+            std::env::var("BRAIN_EVAL_ENDPOINT")
+                .ok()
+                .and_then(|s| s.parse().ok())
+        })
+        .unwrap_or_else(|| {
+            DEFAULT_ENDPOINT
+                .parse()
+                .expect("invariant: default endpoint literal parses")
+        })
+}
+
+/// `brain-eval acceptance` — run the v1.0 acceptance suite and gate on it.
+/// Correctness gates must pass everywhere; performance gates are
+/// informational off reference hardware. `BRAIN_EVAL_RESTART_RECOVERY=1`
+/// adds the (slower, docker-booting) restart-recovery gate.
+async fn acceptance_cmd(endpoint: SocketAddr) -> ExitCode {
+    println!("brain-eval :: v1.0 acceptance");
+    println!("  endpoint : {endpoint}");
+    println!();
+
+    let mut cfg = AcceptanceConfig::smoke(endpoint);
+    cfg.run_restart_recovery = std::env::var("BRAIN_EVAL_RESTART_RECOVERY").as_deref() == Ok("1");
+
+    let report = run_acceptance(cfg).await;
+    print!("{}", report.to_text());
+
+    if report.all_pass() {
+        println!("acceptance: PASS (all gates, including performance)");
+        ExitCode::SUCCESS
+    } else if report.correctness_pass() {
+        println!(
+            "acceptance: correctness PASS; performance gates need reference \
+             hardware (16c/64GB/NVMe) to be meaningful — see the report above"
+        );
+        ExitCode::SUCCESS
+    } else {
+        eprintln!("acceptance: FAIL — a correctness gate did not pass");
+        ExitCode::from(1)
+    }
+}
+
+/// `brain-eval soak` — sustained workload + drift sampling.
+/// `BRAIN_EVAL_SOAK_SECS` sets the duration (default 5 s smoke).
+async fn soak_cmd(endpoint: SocketAddr) -> ExitCode {
+    let secs: u64 = std::env::var("BRAIN_EVAL_SOAK_SECS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(5);
+    println!("brain-eval :: soak ({secs}s)");
+    println!("  endpoint : {endpoint}");
+    println!();
+
+    let mut cfg = SoakConfig::smoke();
+    cfg.duration = std::time::Duration::from_secs(secs);
+
+    match run_soak(endpoint, &cfg).await {
+        Ok(report) => {
+            print!("{}", report.to_text());
+            if report.healthy() {
+                ExitCode::SUCCESS
+            } else {
+                eprintln!("soak: FAIL — errors or recall drift detected");
+                ExitCode::from(1)
+            }
+        }
+        Err(e) => {
+            eprintln!("error: soak run failed: {e}");
             ExitCode::from(1)
         }
     }
@@ -162,6 +248,11 @@ fn print_usage() {
          \x20 dmr             DMR / MemGPT (needs BRAIN_EVAL_DATASETS_DIR)\n\
          \x20 longmemeval-s   LongMemEval-S (needs BRAIN_EVAL_DATASETS_DIR)\n\
          \x20 locomo          LoCoMo (needs BRAIN_EVAL_DATASETS_DIR)\n\
+         \n\
+         system commands:\n\
+         \x20 acceptance      v1.0 acceptance suite (latency/throughput/recall/scenarios)\n\
+         \x20                 BRAIN_EVAL_RESTART_RECOVERY=1 adds the restart-recovery gate\n\
+         \x20 soak            sustained workload + drift sampling (BRAIN_EVAL_SOAK_SECS)\n\
          \n\
          env: BRAIN_EVAL_ENDPOINT, BRAIN_EVAL_MAX_QUESTIONS, BRAIN_EVAL_TOP_K,\n\
          \x20    BRAIN_EVAL_OUTPUT_DIR, BRAIN_EVAL_FORMATS"
