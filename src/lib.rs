@@ -48,4 +48,5 @@ pub mod core;
 pub mod datasets;
 pub mod report;
 pub mod run;
+pub mod scale;
 pub mod score;
