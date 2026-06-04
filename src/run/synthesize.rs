@@ -13,7 +13,7 @@
 //! substring rule catches "ground truth contained in any returned
 //! memory's text," which is enough for fact-style benchmarks.
 
-use brain_protocol::response::MemoryResult;
+use brain_db_sdk::wire::types::MemoryResult;
 
 use crate::core::instance::QuestionType;
 
@@ -50,8 +50,7 @@ pub fn synthesize_answer(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use brain_protocol::request::MemoryKindWire;
-    use brain_protocol::response::MemoryResult;
+    use brain_db_sdk::wire::types::{MemoryKindWire, MemoryResult};
 
     fn mem(text: &str) -> MemoryResult {
         MemoryResult {
@@ -61,14 +60,14 @@ mod tests {
             confidence: 0.0,
             salience: 0.0,
             kind: MemoryKindWire::Episodic,
+            agent_id: [0u8; 16],
             context_id: 0,
             created_at_unix_nanos: 0,
             last_accessed_at_unix_nanos: 0,
-            vector_offset: 0,
-            vector_dim: 0,
             edges: None,
             contributing_retrievers: Vec::new(),
             fused_score: 0.0,
+            rerank_score: None,
             salience_initial: 0.0,
             access_count: 0,
             lsn: 0,
@@ -76,6 +75,7 @@ mod tests {
             consolidated_at_unix_nanos: None,
             edges_out_count: 0,
             edges_in_count: 0,
+            graph: None,
         }
     }
 

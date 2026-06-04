@@ -65,6 +65,11 @@ impl Reporter for TextReporter {
             writeln!(f, "Retrieval quality")?;
             writeln!(
                 f,
+                "  Recall@1  : {:.4}",
+                r.recall_at_1
+            )?;
+            writeln!(
+                f,
                 "  Recall@5  : {:.4}    Recall@10 : {:.4}",
                 r.recall_at_5, r.recall_at_10
             )?;

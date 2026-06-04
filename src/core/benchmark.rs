@@ -69,4 +69,12 @@ pub trait Benchmark: Send + Sync {
     fn requires_synthesis(&self) -> bool {
         false
     }
+
+    /// When `true` (the default), the runner refuses to start unless
+    /// `BRAIN_EVAL_DATASETS_DIR` is set — file-backed benchmarks need
+    /// it to locate their data. Compiled-in benchmarks (the smoke
+    /// corpus) override this to `false` so they run with zero config.
+    fn requires_datasets_dir(&self) -> bool {
+        true
+    }
 }

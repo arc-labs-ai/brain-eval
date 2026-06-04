@@ -2,17 +2,17 @@
 
 Evaluation, benchmarking, and report generation for [Brain](https://github.com/brain-db-io/brain) — the cognitive substrate for AI agents.
 
-A client-side rig that talks to a running `brain-server` over the wire (via `brain-sdk-rust`), drives a benchmark dataset through the cognitive ops loop (ENCODE → RECALL), judges answers against ground truth, and produces a `BenchmarkReport` in JSON + plain-text form.
+A client-side rig that talks to a running `brain-server` over the wire (via `brain-db-sdk`), drives a benchmark dataset through the cognitive ops loop (ENCODE → RECALL), judges answers against ground truth, and produces a `BenchmarkReport` in JSON + plain-text form.
 
 ## What this crate is
 
 | Layer | Purpose |
 |---|---|
 | `Benchmark` trait | One impl per dataset. `DmrBenchmark` ships first; LongMemEval / LoCoMo / BEAM are follow-ups. |
-| `BrainEvalHarness` | Wraps `brain_sdk_rust::Client` with `ingest()` + `recall()` helpers. One harness = one `AgentId` = full data-level isolation from other questions. |
+| `BrainEvalHarness` | Wraps `brain_db_sdk::BrainClient` with `ingest()` + `recall()` helpers. One harness = one `AgentId` = full data-level isolation from other questions. |
 | `EvalRunner` | Loops over instances, drives the harness, calls the judge, aggregates metrics, writes reports. |
 | Heuristic judge | Substring + token-overlap scoring against ground truth. Honest for fact benchmarks; a directional signal for multi-hop. |
-| `live-llm` feature | Stub for LLM-as-judge — wires in once `brain-sdk-rust` grows the surface (follow-up). |
+| `live-llm` feature | Stub for LLM-as-judge — wires in once `brain-db-sdk` grows the surface (follow-up). |
 
 ## Status
 
@@ -25,9 +25,9 @@ A client-side rig that talks to a running `brain-server` over the wire (via `bra
 | Answer synthesis (top-K concatenation) | ✅ |
 | `BrainEvalHarness` (remote SDK) | ✅ |
 | `EvalRunner` | ✅ |
+| `brain-eval` CLI binary | ✅ |
 | Reporters: JSON + text | ✅ |
-| `ScriptedLlm` mock | ✅ |
-| Deterministic fixtures | ✅ |
+| `SmokeBenchmark` (compiled-in, zero-download Recall@1 canary) | ✅ |
 | `DmrBenchmark` loader | ✅ |
 | `LongMemEvalS` loader (500 questions, ICLR 2025) | ✅ |
 | `LocomoBenchmark` loader (~1540 questions, ACL 2024) | ✅ |
@@ -44,20 +44,22 @@ A client-side rig that talks to a running `brain-server` over the wire (via `bra
 
 ## Repo layout expected
 
-This crate has path dependencies on three crates in the upstream `brain` source tree. The on-disk layout the manifest expects:
+brain-eval depends on **the SDK only** (`brain-db-sdk`) — it is a black-box
+client that talks to a running `brain-server` over the wire, never the
+substrate's internal crates. It declares `brain-db-sdk = "0.1"` and, for
+side-by-side local development, patches that to the sibling SDK checkout:
 
 ```
-~/Desktop/
-├── brain/                         # the substrate source tree (separate repo)
-│   └── crates/
-│       ├── brain-core/
-│       ├── brain-protocol/
-│       └── brain-sdk-rust/
-└── brain-db-io/
-    └── brain-eval/                # ← this repo
+brain-db-io/
+├── brain-sdk/                     # the SDK (separate repo)
+│   └── rust/                      # the brain-db-sdk crate
+└── brain-eval/                    # ← this repo
 ```
 
-If the upstream `brain` repo lives somewhere else on your machine, edit the three `path = "../../brain/..."` entries in `Cargo.toml` or set up a symlink at `../../brain` pointing at your checkout. Once `brain-db-io/brain` is published publicly, the Cargo.toml comments document the swap to git deps + `[patch]` override.
+The `[patch.crates-io]` block in `Cargo.toml` points `brain-db-sdk` at
+`../brain-sdk/rust`. Remove it to build against the published crate once
+the SDK ships to crates.io. If your SDK checkout lives elsewhere, edit that
+one path entry.
 
 ## Quick start
 
@@ -119,7 +121,7 @@ export BRAIN_EVAL_ENDPOINT=127.0.0.1:9090
 export BRAIN_EVAL_MAX_QUESTIONS=10        # smoke cap; remove to run the full 500
 export BRAIN_EVAL_TOP_K=10
 
-cargo run --release --example run_longmemeval
+cargo run --release --bin brain-eval -- longmemeval-s
 ```
 
 Expected stdout shape:
@@ -160,7 +162,7 @@ When you're confident the smoke run is healthy, drop the cap and re-run:
 
 ```bash
 unset BRAIN_EVAL_MAX_QUESTIONS
-cargo run --release --example run_longmemeval
+cargo run --release --bin brain-eval -- longmemeval-s
 ```
 
 A full 500-question pass with the heuristic judge takes 5–15 minutes depending on hardware (dominated by ingest time — each question carries its own haystack).
@@ -171,53 +173,39 @@ A full 500-question pass with the heuristic judge takes 5–15 minutes depending
 - `metrics.tokens.*` are all `0` — Brain's wire doesn't surface per-request token counts to the SDK yet. Honest zeros, not invented numbers.
 - `metrics.write_quality.*` reflects the substrate's fingerprint dedupe behaviour (driven by `EncodeBuilder::deduplicate(true)` in the harness).
 
+### Zero-config smoke run (Recall@1 canary)
+
+The fastest real signal — a compiled-in 18-memory corpus + 12 questions, no dataset download. Needs only a running `brain-server`:
+
+```bash
+cargo run --bin brain-eval -- smoke --endpoint 127.0.0.1:9090
+```
+
+Each question's gold answer is a substring unique to exactly one memory, so Recall@1 == 1.0 iff every question's single best hit is the intended memory. Use it as the inner-loop check after substrate changes.
+
 ### Sanity-check without a live server
 
-Two paths, depending on how much of the pipeline you want to exercise:
-
-**Parser-only golden test** — runs against the 5-row smoke fixture, asserts the loader produces the right `EvalInstance` shape per question type:
+Everything except retrieval is exercised by the unit + parser tests — no server, no datasets, no mocks:
 
 ```bash
-cargo test --test longmemeval_loader
+cargo test
 ```
 
-~10 ms.
-
-**Full-pipeline validator with mocked recall** — runs parser → synthesize → judge → metrics → reporters end-to-end against the smoke fixture, substituting a deterministic mock RECALL response for the wire roundtrip. Produces a real `BenchmarkReport` (JSON + text) under `target/eval-reports/`:
-
-```bash
-cargo run --example validate_pipeline
-```
-
-Output is a 5-instance benchmark report — same shape and code paths a Linux run would produce, just with mocked retrieval. Useful on macOS / non-Linux dev hosts where `brain-server` exits as a stub (Glommio + io_uring require Linux).
-
-Sample headline numbers on the smoke fixture:
-
-```
-instances         : 5
-accuracy          : 0.8000  (4 correct, 0 partial, 1 incorrect)
-write p50/p95 ms  : 59/59
-read p50/p95 ms   : 7/7
-Recall@5 / @10    : 1.0000 / 1.0000
-NDCG@5 / @10      : 0.8155 / 0.8155
-Per-dimension     : single_hop 1.0, preference 1.0, multi_hop 1.0,
-                    knowledge_update 1.0, abstention 0.0
-```
-
-The abstention miss is genuine: the heuristic synthesizer can't refuse on its own — even with no relevant hit it returns content. That's an honest demonstration of why the LLM-judge follow-up matters for abstention-heavy benchmarks.
+This covers the dataset loaders (against checked-in fixtures), the judge, metrics, retrieval math, and the reporters. The retrieval roundtrip is genuinely real-only: the two `#[ignore]`d integration tests (`basic_e2e`, `runner_e2e`) require a live server and are opted into with `BRAIN_EVAL_ENDPOINT` + `--ignored`.
 
 ---
 
-A full DMR / LoCoMo run follows the same shape; the dataset-specific `_competitor_baselines()` functions in `src/report/baselines.rs` are the substitution point for those benchmarks.
+A full DMR / LoCoMo run follows the same shape as the smoke run; the dataset-specific `_competitor_baselines()` functions in `src/report/baselines.rs` are the substitution point for those benchmarks.
 
 ## Architecture
 
-Six top-level folders, each answering one question — pipeline order from top to bottom:
+Five top-level folders, each answering one question — pipeline order from top to bottom:
 
 ```
-crates/brain-eval/
+brain-eval/
 ├── src/
 │   ├── lib.rs                     — module declarations only
+│   ├── bin/brain-eval.rs          — CLI entrypoint (smoke | dmr | longmemeval-s | locomo)
 │   │
 │   ├── core/                      — what types does eval revolve around?
 │   │   ├── benchmark.rs           — Benchmark trait + EvalError
@@ -226,14 +214,14 @@ crates/brain-eval/
 │   │
 │   ├── run/                       — how does a run happen?
 │   │   ├── config.rs              — RunConfig + env vars + ReporterKind
-│   │   ├── harness.rs             — BrainEvalHarness (wraps brain-sdk-rust)
+│   │   ├── harness.rs             — BrainEvalHarness (wraps brain-db-sdk)
 │   │   ├── synthesize.rs          — top-K → candidate answer
 │   │   └── runner.rs              — EvalRunner orchestration
 │   │
 │   ├── score/                     — how do we score answers?
 │   │   ├── judge.rs               — heuristic judge (LLM judge follow-up)
 │   │   ├── metrics.rs             — EvalMetrics, compute_full_metrics
-│   │   ├── retrieval.rs           — RetrievalStats, Recall@K, NDCG@K
+│   │   ├── retrieval.rs           — RetrievalStats, Recall@1/5/10, NDCG@K
 │   │   └── latency.rs             — LatencyStats, percentile helpers
 │   │
 │   ├── report/                    — what does the output look like?
@@ -243,19 +231,19 @@ crates/brain-eval/
 │   │       ├── json.rs
 │   │       └── text.rs            — (html.rs lands here later)
 │   │
-│   ├── datasets/                  — which benchmarks can we load?
-│   │   ├── dmr.rs                 — DMR (MemGPT 2023)
-│   │   ├── longmemeval.rs         — LongMemEval-S (ICLR 2025)
-│   │   └── locomo.rs              — LoCoMo (ACL 2024)
-│   │
-│   └── testing/                   — mocks + fixtures for tests
-│       ├── scripted_llm.rs
-│       └── fixtures.rs
+│   └── datasets/                  — which benchmarks can we load?
+│       ├── smoke.rs               — compiled-in Aurora corpus (zero download)
+│       ├── dmr.rs                 — DMR (MemGPT 2023)
+│       ├── longmemeval.rs         — LongMemEval-S (ICLR 2025)
+│       └── locomo.rs              — LoCoMo (ACL 2024)
 │
-└── tests/basic_e2e.rs             — tier-1 round-trip (ignored by default)
+└── tests/
+    ├── basic_e2e.rs               — harness round-trip      (ignored; needs a server)
+    ├── runner_e2e.rs              — full smoke run           (ignored; needs a server)
+    └── longmemeval_loader.rs      — parser golden test       (no server)
 ```
 
-Pipeline reads top-to-bottom: define types in `core/`, run with `run/`, score with `score/`, present with `report/`. `datasets/` and `testing/` are the supporting cast.
+Pipeline reads top-to-bottom: define types in `core/`, run with `run/`, score with `score/`, present with `report/`. `datasets/` is the supporting cast. The library surface is production code only — test fixtures live in the tests that use them.
 
 ## Environment variables
 
@@ -349,7 +337,7 @@ Category mapping: `1 → SingleHop`, `2 → MultiHop`, `3 → Temporal`, `4 → 
 
 In rough priority order:
 
-1. **LLM judge wired through `brain-sdk-rust`.** Brain serves LLM extractor calls internally; expose a `judge_with_llm` op so eval can use the same provider without bringing in a separate Anthropic/OpenAI SDK. **This is the next high-leverage piece — both LongMemEval and LoCoMo `requires_synthesis() == true`, so without it published numbers are heuristic-only and not cross-comparable.**
+1. **LLM judge wired through `brain-db-sdk`.** Brain serves LLM extractor calls internally; expose a `judge_with_llm` op so eval can use the same provider without bringing in a separate Anthropic/OpenAI SDK. **This is the next high-leverage piece — both LongMemEval and LoCoMo `requires_synthesis() == true`, so without it published numbers are heuristic-only and not cross-comparable.**
 2. **Token accounting on the wire.** Add `prompt_tokens` / `completion_tokens` to `EncodeResponse` and `RecallResponseFrame` (or carry them on a side-channel telemetry frame). Wire VERSION bump.
 3. **BEAM loader.** 1M–10M scale benchmark; pairs with criterion runs.
 4. **HTML reporter.** Self-contained dark/light-mode report with Chart.js latency/accuracy plots.
@@ -357,4 +345,4 @@ In rough priority order:
 6. **Spec §16/02 latency gate.** Make CI fail when p99 RECALL > target.
 7. **Hybrid-vs-substrate criterion bench.** Side-by-side latency + accuracy comparison; the Brain-unique eval axis.
 
-Authoritative source: `spec/16_benchmarks_acceptance/` — read before adding any new benchmark dimension.
+Authoritative source: `spec/19_benchmarks/ (in the brain-db repo)` — read before adding any new benchmark dimension.

@@ -15,7 +15,6 @@
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use tracing::warn;
 
@@ -60,7 +59,13 @@ impl EvalRunner {
     /// - [`EvalError::Harness`] for SDK / network errors that prevent
     ///   the run from making progress at all.
     pub async fn run(&self, benchmark: &dyn Benchmark) -> Result<BenchmarkReport, EvalError> {
-        let datasets_dir = datasets_dir().ok_or(EvalError::DatasetsDirNotSet)?;
+        let datasets_dir = if benchmark.requires_datasets_dir() {
+            datasets_dir().ok_or(EvalError::DatasetsDirNotSet)?
+        } else {
+            // Compiled-in benchmarks ignore the path; pass a harmless
+            // placeholder so `load` keeps its uniform signature.
+            PathBuf::from(".")
+        };
         let instances = benchmark.load(&datasets_dir)?;
         let instances = match self.config.max_questions {
             Some(n) => instances.into_iter().take(n).collect::<Vec<_>>(),
@@ -92,10 +97,9 @@ impl EvalRunner {
         }
 
         let mut question_results: Vec<QuestionResult> = Vec::with_capacity(instances.len());
-        let cfg = Arc::new(self.config.clone());
 
         for (conv_key, idxs) in &groups {
-            let harness = match BrainEvalHarness::connect(cfg.endpoint).await {
+            let harness = match BrainEvalHarness::connect(self.config.endpoint).await {
                 Ok(h) => h,
                 Err(e) => {
                     warn!(

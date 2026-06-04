@@ -3,10 +3,15 @@
 **/*.rs.bk
 *.pdb
 
-# Cargo lockfile — this crate produces a binary (the `run_longmemeval`
-# and `validate_pipeline` examples), so committing Cargo.lock is the
-# right call. Override here only if upstream pinning becomes painful.
+# Cargo lockfile — this crate ships a binary (the `brain-eval` CLI), so
+# committing Cargo.lock is the right call. Override here only if
+# upstream pinning becomes painful.
 # /Cargo.lock
+
+# Local-development dependency override — redirects the brain-db git
+# deps to a local checkout. Per-machine; never committed. Copy from
+# .cargo/config.toml.example to enable.
+/.cargo/config.toml
 
 # IDE / editor noise
 .idea/

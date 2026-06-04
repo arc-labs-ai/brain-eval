@@ -72,5 +72,5 @@ SIZE=$(du -h "$TARGET_FILE" | awk '{print $1}')
 echo "ok: $TARGET_FILE ($SIZE)"
 echo
 echo "Next:"
-echo "  cargo run --release --example run_longmemeval \\"
-echo "    --manifest-path crates/brain-eval/Cargo.toml"
+echo "  BRAIN_EVAL_ENDPOINT=127.0.0.1:9090 \\"
+echo "    cargo run --release --bin brain-eval -- longmemeval-s"

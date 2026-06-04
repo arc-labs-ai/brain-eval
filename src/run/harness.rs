@@ -1,30 +1,24 @@
 //! `BrainEvalHarness` — the eval-side wrapper around
-//! [`brain_sdk_rust::Client`].
+//! [`brain_db_sdk::BrainClient`].
 //!
-//! Each harness instance owns one [`Client`] bound to a fresh
-//! [`AgentId`]. Per-test isolation is achieved by spawning a new
-//! harness per scope — every agent maps to its own shard slice, so
-//! agent A's memories are never visible to agent B (Brain's natural
-//! routing rule from `network/routing.rs`).
+//! Each harness instance owns one client bound to a fresh agent id.
+//! Per-test isolation is achieved by spawning a new harness per scope —
+//! every agent maps to its own shard slice, so agent A's memories are
+//! never visible to agent B (Brain's natural routing rule).
 //!
 //! Two methods cover the eval surface today:
 //!
-//! - [`BrainEvalHarness::ingest`] — concatenate a session's turns into
-//!   one ENCODE per turn. Returns the ids of the freshly written
-//!   memories so callers can correlate downstream.
+//! - [`BrainEvalHarness::ingest`] — one ENCODE per user turn. Returns the
+//!   ids of the freshly written memories so callers can correlate
+//!   downstream.
 //! - [`BrainEvalHarness::recall`] — issue a RECALL with `include_text`
 //!   set, returning a [`RecallOutcome`] with hits + per-call latency.
-//!
-//! The harness is `clone`-able (every field is cheap to clone) so the
-//! same instance can drive a single conversation's ingest + N
-//! per-question recalls.
 
 use std::net::SocketAddr;
 use std::time::Instant;
 
-use brain_core::{AgentId, MemoryId};
-use brain_protocol::response::MemoryResult;
-use brain_sdk_rust::{Client, ClientConfig, ClientError};
+use brain_db_sdk::wire::types::{MemoryResult, WireMemoryId, WireUuid};
+use brain_db_sdk::{BrainClient, BrainError, ClientConfig, EncodeBuilder, RecallBuilder};
 
 use crate::core::instance::TurnRecord;
 
@@ -33,48 +27,52 @@ use crate::core::instance::TurnRecord;
 #[non_exhaustive]
 pub enum HarnessError {
     /// The underlying SDK client returned an error.
-    #[error("brain-sdk-rust error: {0}")]
-    Sdk(#[from] ClientError),
+    #[error("brain-db-sdk error: {0}")]
+    Sdk(#[from] BrainError),
 }
 
 /// One driver bound to one agent.
-#[derive(Clone)]
+///
+/// Not `Clone`: the SDK client owns a live connection. A harness drives
+/// one conversation's ingest plus its N per-question recalls through
+/// `&self`, so cloning was never needed.
 pub struct BrainEvalHarness {
-    client: Client,
-    agent_id: AgentId,
+    client: BrainClient,
+    agent_id: WireUuid,
 }
 
 impl BrainEvalHarness {
-    /// Open a fresh connection with a fresh `AgentId`. Drives the
+    /// Open a fresh connection with a fresh agent id. Drives the
     /// HELLO → WELCOME → AUTH → AUTH_OK handshake before returning.
     pub async fn connect(addr: SocketAddr) -> Result<Self, HarnessError> {
-        let agent_id = AgentId::new();
-        let config = ClientConfig::default();
-        let client = Client::connect_with(addr, agent_id, config).await?;
-        Ok(Self { client, agent_id })
+        let agent_id = brain_db_sdk::new_id();
+        Self::connect_with_agent(addr, agent_id).await
     }
 
     /// Connect with an explicit agent id (useful for tests asserting
     /// isolation, or for resuming an existing eval scope).
     pub async fn connect_with_agent(
         addr: SocketAddr,
-        agent_id: AgentId,
+        agent_id: WireUuid,
     ) -> Result<Self, HarnessError> {
-        let config = ClientConfig::default();
-        let client = Client::connect_with(addr, agent_id, config).await?;
+        let config = ClientConfig {
+            agent_id,
+            ..ClientConfig::default()
+        };
+        let client = BrainClient::connect_with(addr, config).await?;
         Ok(Self { client, agent_id })
     }
 
     /// The agent id this harness was bound to.
     #[must_use]
-    pub fn agent_id(&self) -> AgentId {
+    pub fn agent_id(&self) -> WireUuid {
         self.agent_id
     }
 
-    /// Borrow the underlying SDK client (escape hatch for tests
-    /// touching ops we haven't surfaced here yet, e.g. SUBSCRIBE).
+    /// Borrow the underlying SDK client (escape hatch for tests touching
+    /// ops we haven't surfaced here yet, e.g. SUBSCRIBE).
     #[must_use]
-    pub fn client(&self) -> &Client {
+    pub fn client(&self) -> &BrainClient {
         &self.client
     }
 
@@ -85,7 +83,7 @@ impl BrainEvalHarness {
     /// latency for the entire ingest.
     pub async fn ingest(&self, turns: &[TurnRecord]) -> Result<IngestOutcome, HarnessError> {
         let start = Instant::now();
-        let mut stored_ids: Vec<MemoryId> = Vec::new();
+        let mut stored_ids: Vec<WireMemoryId> = Vec::new();
         let mut attempted = 0u64;
         let mut deduplicated = 0u64;
 
@@ -97,16 +95,14 @@ impl BrainEvalHarness {
                 continue;
             }
             attempted += 1;
-            let resp = self
-                .client
-                .encode(&turn.content)
+            let request = EncodeBuilder::new(turn.content.as_str())
                 .deduplicate(true)
-                .send()
-                .await?;
+                .build();
+            let resp = self.client.encode(&request).await?;
             if resp.was_deduplicated {
                 deduplicated += 1;
             } else {
-                stored_ids.push(MemoryId::from_raw(resp.memory_id));
+                stored_ids.push(resp.memory_id);
             }
         }
 
@@ -121,26 +117,20 @@ impl BrainEvalHarness {
 
     /// Run a RECALL with `include_text` so the eval can read memory
     /// contents back for substring scoring.
-    pub async fn recall(
-        &self,
-        cue: &str,
-        top_k: u32,
-    ) -> Result<RecallOutcome, HarnessError> {
+    pub async fn recall(&self, cue: &str, top_k: u32) -> Result<RecallOutcome, HarnessError> {
         let start = Instant::now();
-        let hits = self
-            .client
-            .recall(cue)
+        let request = RecallBuilder::new(cue)
             .top_k(top_k)
             .include_text(true)
-            .send()
-            .await?;
+            .build();
+        let hits = self.client.recall(&request).await?;
         let latency_ms = elapsed_ms(start);
         Ok(RecallOutcome { hits, latency_ms })
     }
 
-    /// Close the underlying client. Idempotent.
+    /// Close the underlying client.
     pub async fn close(self) -> Result<(), HarnessError> {
-        self.client.bye().await?;
+        self.client.close().await?;
         Ok(())
     }
 }
@@ -148,8 +138,8 @@ impl BrainEvalHarness {
 /// Outcome of one [`BrainEvalHarness::ingest`] call.
 #[derive(Debug, Clone)]
 pub struct IngestOutcome {
-    /// MemoryIds of fresh memories the substrate accepted.
-    pub stored_ids: Vec<MemoryId>,
+    /// Ids of fresh memories the substrate accepted.
+    pub stored_ids: Vec<WireMemoryId>,
     /// Number of ENCODE attempts (user turns processed).
     pub attempted: u64,
     /// Number of attempts that hit the fingerprint dedupe path.

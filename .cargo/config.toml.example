@@ -1,0 +1,19 @@
+# Local-development dependency override.
+#
+# Copy this file to `.cargo/config.toml` (gitignored) to build brain-eval
+# against a LOCAL `brain-sdk` checkout instead of the published git
+# dependency — e.g. to test against unpushed SDK changes.
+#
+# Assumes the layout:
+#
+#   brain-db-io/
+#   ├── brain-sdk/                   # the SDK source (this repo's git dep)
+#   │   └── rust/                    # the brain-db-sdk crate
+#   └── brain-eval/                  # ← you are here
+#
+# The `paths` override replaces the `brain-db-sdk` git dependency with the
+# local crate by name — no edit to Cargo.toml needed, so clones without
+# this file build straight from GitHub. Adjust the path if your checkout
+# sits elsewhere.
+
+paths = ["../brain-sdk/rust"]

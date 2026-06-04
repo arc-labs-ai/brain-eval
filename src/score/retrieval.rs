@@ -13,9 +13,13 @@ use serde::{Deserialize, Serialize};
 
 use crate::core::outcome::QuestionResult;
 
-/// Retrieval-quality metrics at K=5 and K=10.
+/// Retrieval-quality metrics at K=1, 5, and 10.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RetrievalStats {
+    /// Recall@1: fraction of questions whose rank-1 hit is relevant.
+    /// The strictest signal — "did the single best result answer the
+    /// question?" — and the headline number for the smoke corpus.
+    pub recall_at_1: f64,
     /// Recall@5: fraction of relevant memories in the top-5 results.
     pub recall_at_5: f64,
     /// Recall@10.
@@ -35,6 +39,7 @@ pub fn compute_retrieval_stats(results: &[QuestionResult]) -> Option<RetrievalSt
         return None;
     }
     Some(RetrievalStats {
+        recall_at_1: mean_recall_at_k(results, 1),
         recall_at_5: mean_recall_at_k(results, 5),
         recall_at_10: mean_recall_at_k(results, 10),
         ndcg_at_5: mean_ndcg_at_k(results, 5),

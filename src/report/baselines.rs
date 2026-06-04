@@ -12,6 +12,14 @@ use crate::report::shape::CompetitorRow;
 /// benchmark it's about to run.
 pub type CompetitorBaselines = fn() -> Vec<CompetitorRow>;
 
+/// The smoke corpus is Brain's own fixture, not a published
+/// benchmark — there are no external competitor numbers to compare
+/// against. The smoke report stands alone as a Recall@1 canary.
+#[must_use]
+pub fn smoke_competitor_baselines() -> Vec<CompetitorRow> {
+    Vec::new()
+}
+
 /// Empty placeholder — fill in as DMR numbers from competitors are
 /// collected. (The original MemGPT paper reported DMR; that's the
 /// natural first row to add.)

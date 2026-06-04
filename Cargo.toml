@@ -15,38 +15,24 @@ default = []
 live-llm = []
 
 # ----------------------------------------------------------------------------
-# Dependencies on the substrate crates
+# Dependency on the SDK — and ONLY the SDK.
 #
-# Today: relative paths to a `brain` checkout that sits next to the
-# `brain-db-io` org folder — i.e. `../../brain/crates/brain-*` from
-# this manifest. Layout assumed:
+# brain-eval is a black-box client: it drives a running brain-server purely
+# over the wire through the published Rust SDK, never the substrate's
+# internal crates. Wire types it needs (MemoryResult, MemoryKindWire, the
+# id aliases) are re-exported from `brain_db_sdk::wire`. This keeps the
+# eval rig decoupled from substrate internals — the whole point of the
+# repo split.
 #
-#   ~/Desktop/
-#   ├── brain/                       # the substrate source tree
-#   └── brain-db-io/
-#       └── brain-eval/              # ← this repo
-#
-# Anyone cloning brain-eval needs the brain repo checked out at
-# `../../brain` relative to this Cargo.toml.
-#
-# When `brain-db-io/brain` is published publicly, swap to git deps and
-# add a `[patch."https://github.com/brain-db-io/brain"]` block at the
-# bottom of this file that redirects to the local paths during dev:
-#
-#   brain-core     = { git = "https://github.com/brain-db-io/brain", branch = "main" }
-#   brain-protocol = { git = "https://github.com/brain-db-io/brain", branch = "main" }
-#   brain-sdk-rust = { git = "https://github.com/brain-db-io/brain", branch = "main" }
-#
-#   [patch."https://github.com/brain-db-io/brain"]
-#   brain-core     = { path = "../../brain/crates/brain-core" }
-#   brain-protocol = { path = "../../brain/crates/brain-protocol" }
-#   brain-sdk-rust = { path = "../../brain/crates/brain-sdk-rust" }
+# We depend on the PUBLISHED crate (`brain-db-sdk = "0.1"`); the
+# `[patch.crates-io]` at the bottom redirects to the sibling `brain-sdk`
+# checkout for local co-development, so this repo builds standalone (from
+# crates.io, once published) and in the side-by-side layout (from the
+# path) without edits. Same pattern brain-shell uses.
 # ----------------------------------------------------------------------------
 
 [dependencies]
-brain-core     = { path = "../../brain/crates/brain-core" }
-brain-protocol = { path = "../../brain/crates/brain-protocol" }
-brain-sdk-rust = { path = "../../brain/crates/brain-sdk-rust" }
+brain-db-sdk = "0.1"
 
 tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "macros", "signal", "time", "sync"] }
 serde = { version = "1", features = ["derive"] }
@@ -57,3 +43,9 @@ tracing = "0.1"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "test-util"] }
+
+# Local co-development override: build against the sibling SDK checkout
+# instead of the crates.io release. Remove (or comment out) to force a
+# pure crates.io build, e.g. when validating the published package.
+[patch.crates-io]
+brain-db-sdk = { path = "../brain-sdk/rust" }

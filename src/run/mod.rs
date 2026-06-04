@@ -1,7 +1,7 @@
 //! How an eval run actually happens.
 //!
 //! - [`config`]    — `RunConfig`, env-var parsing, [`ReporterKind`].
-//! - [`harness`]   — `BrainEvalHarness` wrapping `brain-sdk-rust`.
+//! - [`harness`]   — `BrainEvalHarness` wrapping `brain-db-sdk`.
 //! - [`synthesize`] — top-K → candidate answer.
 //! - [`runner`]    — `EvalRunner`: orchestrates ingest → recall → judge.
 

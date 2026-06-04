@@ -12,7 +12,7 @@
 //!
 //! The `live-llm` path is intentionally not wired into the runner
 //! yet — Brain doesn't expose a per-request LLM call surface from
-//! `brain-sdk-rust`. The hook lives here so it can be filled in once
+//! `brain-db-sdk`. The hook lives here so it can be filled in once
 //! the SDK grows a `judge_with_llm` method.
 
 use crate::core::instance::QuestionType;

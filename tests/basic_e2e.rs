@@ -13,11 +13,47 @@
 
 use std::net::SocketAddr;
 
-use brain_eval::core::instance::QuestionType;
+use brain_eval::core::instance::{EvalInstance, QuestionType, Session, TurnRecord};
 use brain_eval::core::outcome::Verdict;
 use brain_eval::run::harness::BrainEvalHarness;
 use brain_eval::score::judge::judge_answer_heuristic;
-use brain_eval::testing::fixtures::deterministic_single_hop;
+
+/// Three deterministic single-hop fact-retrieval instances. Local to
+/// this integration test — the production library ships no test
+/// fixtures. Each instance is one session (user statement → assistant
+/// ack) whose question asks the stated value back.
+fn deterministic_single_hop(n: usize) -> Vec<EvalInstance> {
+    let templates: &[(&str, &str, &str)] = &[
+        ("Paris", "I live in Paris.", "What city do I live in?"),
+        ("blue", "My favourite colour is blue.", "What is my favourite colour?"),
+        ("Toyota", "I drive a Toyota.", "What car do I drive?"),
+    ];
+    (0..n)
+        .map(|i| {
+            let (answer, statement, question) = templates[i % templates.len()];
+            EvalInstance {
+                question_id: format!("fixture-{i}"),
+                question: question.to_string(),
+                answer: answer.to_string(),
+                question_type: QuestionType::SingleHop,
+                conversation_id: None,
+                sessions: vec![Session {
+                    session_id: format!("sess-{i}"),
+                    turns: vec![
+                        TurnRecord {
+                            role: "user".into(),
+                            content: statement.to_string(),
+                        },
+                        TurnRecord {
+                            role: "assistant".into(),
+                            content: "Got it.".to_string(),
+                        },
+                    ],
+                }],
+            }
+        })
+        .collect()
+}
 
 fn endpoint() -> Option<SocketAddr> {
     std::env::var("BRAIN_EVAL_ENDPOINT")

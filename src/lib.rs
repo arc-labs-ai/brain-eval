@@ -5,14 +5,14 @@
 //! ## What this is
 //!
 //! A client-side test rig that talks to a running `brain-server` over
-//! the wire via [`brain_sdk_rust::Client`]. Drives a benchmark dataset
+//! the wire via [`brain_db_sdk::BrainClient`]. Drives a benchmark dataset
 //! through the cognitive ops loop (ENCODE → RECALL), judges answers
 //! against ground truth, and produces a `BenchmarkReport` in JSON / text
 //! form.
 //!
 //! ## Layout — pipeline first
 //!
-//! Six top-level folders, each answering one question:
+//! Five top-level folders, each answering one question:
 //!
 //! | Folder        | Question it answers                              |
 //! |---------------|--------------------------------------------------|
@@ -21,7 +21,6 @@
 //! | [`score`]     | How do we score answers?                         |
 //! | [`report`]    | What does the output look like?                  |
 //! | [`datasets`]  | Which benchmarks do we know how to load?         |
-//! | [`testing`]   | What mocks + fixtures do tests need?             |
 //!
 //! ## Quick start
 //!
@@ -50,4 +49,3 @@ pub mod datasets;
 pub mod report;
 pub mod run;
 pub mod score;
-pub mod testing;
