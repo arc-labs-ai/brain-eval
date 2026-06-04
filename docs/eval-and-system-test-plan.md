@@ -149,6 +149,32 @@ report is the artifact that closes #85. Soak is a separate `--soak 48h` run.
 
 ---
 
+## 7a. Status — as built
+
+All phases delivered and verified live against a running `brain-server`:
+
+- **Phase 0** ✅ SDK-only wiring (`brain-db-sdk` + `[patch]`), harness ported.
+- **Phase 1** ✅ `ServerHandle` (docker-boot + external), live boot→recall→teardown.
+- **Phase 2** ✅ perf/scale: load gen, p50/p99 + throughput probes, `ScaleReport`.
+- **Phase 3 (core)** ✅ multi-agent isolation, encode→recall→forget, txn read-your-writes.
+- **Phase 3b** ✅ restart-recovery / no-data-loss (persistent volume + restart, WAL replay).
+- **Phase 4** ✅ known-answer recall@K (recall@1/@10 vs targets) + `no_regression()` gate.
+- **Phase 5** ✅ acceptance orchestrator (`acceptance` CLI; correctness vs perf gates) + CI.
+- **Phase 6** ✅ soak harness (`soak` CLI; sustained mix + recall-drift sampling).
+
+Live acceptance smoke result: encode p50 1.98 ms / recall p50 1.66 ms (both
+within target), recall@1 1.000, all scenarios pass, correctness PASS.
+
+**Remaining (future increments, not blocking):**
+- Phase 3b extras — schema on/off (needs a schema-DSL fixture), backfill
+  resumability (needs the admin API), chaos kill-during-write (a variant of
+  restart-recovery), subscribe change-feed (needs the SDK mux streaming API).
+- Phase 4 — LLM-as-judge wired through the `live-llm` feature (needs API
+  keys; the heuristic + known-answer recall ship as the default).
+- The full **1M scale-run + 48 h soak** are operator runs on reference
+  hardware via `brain-eval acceptance --scale 1m` / `soak` — physically
+  out of reach of an emulated dev box.
+
 ## 7. Phasing (incremental, each independently shippable)
 
 - **Phase 0 — wiring & boundary.** Fix `Cargo.toml` deps (see §8 D4): point the

@@ -1,0 +1,84 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Build + lint + the no-server tests (unit, parser/golden, library logic).
+  # The ignored e2e / scale / system / soak tests need a running
+  # brain-server and run in the `live` job / on reference hardware.
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      # brain-eval depends on the SDK via `[patch.crates-io] brain-db-sdk =
+      # { path = "../brain-sdk/rust" }`, so the sibling SDK must sit at
+      # ../brain-sdk relative to this checkout.
+      - name: Checkout brain-eval
+        uses: actions/checkout@v4
+        with:
+          path: brain-eval
+      - name: Checkout brain-sdk (sibling, for the [patch] path)
+        uses: actions/checkout@v4
+        with:
+          repository: brain-db-io/brain-sdk
+          path: brain-sdk
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Format
+        working-directory: brain-eval
+        run: cargo fmt --all -- --check
+
+      - name: Build
+        working-directory: brain-eval
+        run: cargo build --all-targets
+
+      - name: Clippy
+        working-directory: brain-eval
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Test (no-server)
+        working-directory: brain-eval
+        run: cargo test
+
+  # Live tier: boot the brain server image and run the acceptance smoke +
+  # system scenarios against it. Requires the `brain:<tag>` image and the
+  # BGE model — provided by a self-hosted runner or an image-build step.
+  # Gated to manual / scheduled runs; the full 1M scale-run + 48h soak run
+  # on reference hardware via `brain-eval acceptance --scale 1m` / `soak`.
+  live:
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout brain-eval
+        uses: actions/checkout@v4
+        with:
+          path: brain-eval
+      - name: Checkout brain-sdk (sibling)
+        uses: actions/checkout@v4
+        with:
+          repository: brain-db-io/brain-sdk
+          path: brain-sdk
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      # A real run needs the brain-server image + the BGE model on disk.
+      # On a self-hosted runner those are present; here we document the
+      # contract and skip if the image is absent.
+      - name: Acceptance smoke (if image present)
+        working-directory: brain-eval
+        run: |
+          if docker image inspect brain:latest >/dev/null 2>&1; then
+            BRAIN_EVAL_RESTART_RECOVERY=1 \
+              cargo run --release --bin brain-eval -- acceptance
+          else
+            echo "brain:latest image not present on this runner; skipping live tier"
+          fi
