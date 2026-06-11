@@ -20,7 +20,8 @@ use std::net::SocketAddr;
 use crate::run::harness::BrainEvalHarness;
 use crate::run::server::DockerServerOpts;
 use crate::scale::{
-    run_recall_quality, run_scale, RecallTargets, ScaleConfig, Targets,
+    run_concurrent_throughput, run_recall_quality, run_scale, ConcurrentConfig, RecallTargets,
+    ScaleConfig, Targets,
 };
 use crate::system::{restart_recovery, run_core_scenarios, run_typed_graph_scenarios};
 
@@ -96,6 +97,8 @@ pub struct AcceptanceConfig {
     pub endpoint: SocketAddr,
     /// Load + probe sizes.
     pub scale: ScaleConfig,
+    /// Concurrent-throughput run parameters.
+    pub concurrent: ConcurrentConfig,
     /// Recall-quality corpus size.
     pub recall_n: usize,
     /// `top_k` for the recall-quality queries.
@@ -117,6 +120,7 @@ impl AcceptanceConfig {
                 probe_n: 50,
                 top_k: 10,
             },
+            concurrent: ConcurrentConfig::smoke(),
             recall_n: 100,
             recall_top_k: 10,
             run_restart_recovery: false,
@@ -162,6 +166,45 @@ pub async fn run_acceptance(cfg: AcceptanceConfig) -> AcceptanceReport {
                     perf: true,
                     passed: false,
                     detail: format!("scale run errored: {e}"),
+                }),
+            }
+
+            // --- concurrent throughput (perf ops/s + correctness no-error)
+            match run_concurrent_throughput(cfg.endpoint, &cfg.concurrent).await {
+                Ok(report) => {
+                    for r in &report.results {
+                        gates.push(Gate {
+                            name: format!("tput:{}", r.verb),
+                            perf: true,
+                            passed: r.meets_floor(),
+                            detail: format!(
+                                "{:.1} ops/s (≥{:.0}) over {} clients; p50 {:.2}ms p99 {:.2}ms; \
+                                 ops={} err={} timeout={}",
+                                r.ops_per_sec,
+                                r.target_ops_per_sec,
+                                r.clients,
+                                r.p50_ms,
+                                r.p99_ms,
+                                r.ops,
+                                r.errors,
+                                r.timeouts,
+                            ),
+                        });
+                    }
+                    // Handling N concurrent clients with zero failed ops is a
+                    // correctness property — it must hold on any hardware.
+                    gates.push(Gate {
+                        name: "concurrent_no_errors".into(),
+                        perf: false,
+                        passed: report.no_errors(),
+                        detail: report.error_summary(),
+                    });
+                }
+                Err(e) => gates.push(Gate {
+                    name: "concurrent_no_errors".into(),
+                    perf: false,
+                    passed: false,
+                    detail: format!("concurrent throughput run errored: {e}"),
                 }),
             }
 

@@ -23,8 +23,12 @@ use crate::run::harness::HarnessError;
 
 pub mod recall;
 mod targets;
+pub mod throughput;
 pub use recall::{no_regression, run_recall_quality, RecallQualityReport, RecallTargets};
 pub use targets::{Targets, VerbTarget};
+pub use throughput::{
+    run_concurrent_throughput, ConcurrentConfig, ConcurrentReport, TputVerb, VerbThroughput,
+};
 
 /// What to run.
 #[derive(Debug, Clone)]
@@ -177,7 +181,12 @@ impl LoadGenerator {
             "warm caches",
         ];
         const MONTHS: &[&str] = &[
-            "January", "March", "June", "September", "November", "December",
+            "January",
+            "March",
+            "June",
+            "September",
+            "November",
+            "December",
         ];
         let topic = TOPICS[i % TOPICS.len()];
         let feature = FEATURES[(i / TOPICS.len()) % FEATURES.len()];
@@ -226,7 +235,10 @@ pub async fn run_scale(
     let mut encode_ms = Vec::with_capacity(cfg.probe_n);
     for i in 0..cfg.probe_n {
         // Fresh content per probe so we time a real write, not a dedup hit.
-        let text = format!("probe encode {i}: {}", LoadGenerator::memory(cfg.ingest_n + i));
+        let text = format!(
+            "probe encode {i}: {}",
+            LoadGenerator::memory(cfg.ingest_n + i)
+        );
         let req = EncodeBuilder::new(text.as_str()).deduplicate(false).build();
         let start = Instant::now();
         client.encode(&req).await?;
@@ -246,8 +258,18 @@ pub async fn run_scale(
     }
 
     // --- throughput (sustained, sequential) --------------------------
-    let encode_tput = throughput("encode", cfg.probe_n, targets.encode_ops_per_sec, &encode_ms);
-    let recall_tput = throughput("recall", cfg.probe_n, targets.recall_ops_per_sec, &recall_ms);
+    let encode_tput = throughput(
+        "encode",
+        cfg.probe_n,
+        targets.encode_ops_per_sec,
+        &encode_ms,
+    );
+    let recall_tput = throughput(
+        "recall",
+        cfg.probe_n,
+        targets.recall_ops_per_sec,
+        &recall_ms,
+    );
 
     Ok(ScaleReport {
         ingested,
