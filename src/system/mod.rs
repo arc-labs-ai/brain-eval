@@ -24,6 +24,9 @@ use crate::run::harness::{BrainEvalHarness, HarnessError};
 pub mod durability;
 pub use durability::restart_recovery;
 
+pub mod typed_graph;
+pub use typed_graph::run_typed_graph_scenarios;
+
 /// Pass/fail result of one scenario.
 #[derive(Debug, Clone)]
 pub struct ScenarioOutcome {

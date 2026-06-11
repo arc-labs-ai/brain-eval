@@ -22,7 +22,7 @@ use crate::run::server::DockerServerOpts;
 use crate::scale::{
     run_recall_quality, run_scale, RecallTargets, ScaleConfig, Targets,
 };
-use crate::system::{restart_recovery, run_core_scenarios};
+use crate::system::{restart_recovery, run_core_scenarios, run_typed_graph_scenarios};
 
 /// One acceptance gate.
 #[derive(Debug, Clone)]
@@ -201,6 +201,16 @@ pub async fn run_acceptance(cfg: AcceptanceConfig) -> AcceptanceReport {
 
     // --- core scenarios (correctness gates) --------------------------
     for o in run_core_scenarios(cfg.endpoint).await {
+        gates.push(Gate {
+            name: o.name.to_string(),
+            perf: false,
+            passed: o.passed,
+            detail: o.detail,
+        });
+    }
+
+    // --- typed-graph "E2" functional suite (correctness gates) -------
+    for o in run_typed_graph_scenarios(cfg.endpoint).await {
         gates.push(Gate {
             name: o.name.to_string(),
             perf: false,
