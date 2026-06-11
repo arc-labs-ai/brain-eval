@@ -21,6 +21,9 @@ use brain_db_sdk::{new_id, EncodeBuilder, ForgetBuilder, RecallBuilder};
 
 use crate::run::harness::{BrainEvalHarness, HarnessError};
 
+pub mod chaos;
+pub use chaos::kill_during_write;
+
 pub mod durability;
 pub use durability::restart_recovery;
 

@@ -24,7 +24,8 @@ use crate::scale::{
     ScaleConfig, Targets,
 };
 use crate::system::{
-    restart_recovery, run_core_scenarios, run_invariant_scenarios, run_typed_graph_scenarios,
+    kill_during_write, restart_recovery, run_core_scenarios, run_invariant_scenarios,
+    run_typed_graph_scenarios,
 };
 
 /// One acceptance gate.
@@ -109,6 +110,10 @@ pub struct AcceptanceConfig {
     pub run_restart_recovery: bool,
     /// Boot opts for the restart-recovery server (unique ports / volume).
     pub recovery_opts: DockerServerOpts,
+    /// Run the kill-during-write chaos gate (boots its own server on a volume).
+    pub run_chaos: bool,
+    /// Boot opts for the chaos server (unique ports / volume).
+    pub chaos_opts: DockerServerOpts,
 }
 
 impl AcceptanceConfig {
@@ -127,6 +132,8 @@ impl AcceptanceConfig {
             recall_top_k: 10,
             run_restart_recovery: false,
             recovery_opts: DockerServerOpts::default(),
+            run_chaos: false,
+            chaos_opts: DockerServerOpts::default(),
         }
     }
 }
@@ -277,6 +284,17 @@ pub async fn run_acceptance(cfg: AcceptanceConfig) -> AcceptanceReport {
     // --- restart-recovery (correctness gate; boots its own server) ---
     if cfg.run_restart_recovery {
         let o = restart_recovery(cfg.recovery_opts.clone()).await;
+        gates.push(Gate {
+            name: o.name.to_string(),
+            perf: false,
+            passed: o.passed,
+            detail: o.detail,
+        });
+    }
+
+    // --- kill-during-write chaos (correctness gate; boots its own server) ---
+    if cfg.run_chaos {
+        let o = kill_during_write(cfg.chaos_opts.clone()).await;
         gates.push(Gate {
             name: o.name.to_string(),
             perf: false,
