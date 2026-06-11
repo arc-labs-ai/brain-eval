@@ -23,7 +23,9 @@ use crate::scale::{
     run_concurrent_throughput, run_recall_quality, run_scale, ConcurrentConfig, RecallTargets,
     ScaleConfig, Targets,
 };
-use crate::system::{restart_recovery, run_core_scenarios, run_typed_graph_scenarios};
+use crate::system::{
+    restart_recovery, run_core_scenarios, run_invariant_scenarios, run_typed_graph_scenarios,
+};
 
 /// One acceptance gate.
 #[derive(Debug, Clone)]
@@ -254,6 +256,16 @@ pub async fn run_acceptance(cfg: AcceptanceConfig) -> AcceptanceReport {
 
     // --- typed-graph "E2" functional suite (correctness gates) -------
     for o in run_typed_graph_scenarios(cfg.endpoint).await {
+        gates.push(Gate {
+            name: o.name.to_string(),
+            perf: false,
+            passed: o.passed,
+            detail: o.detail,
+        });
+    }
+
+    // --- core-invariant "E5" suite (correctness gates) --------------
+    for o in run_invariant_scenarios(cfg.endpoint).await {
         gates.push(Gate {
             name: o.name.to_string(),
             perf: false,
