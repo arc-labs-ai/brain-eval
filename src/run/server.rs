@@ -10,12 +10,15 @@
 //!   back the data-plane endpoint. The handle owns the container; dropping
 //!   it (or calling [`ServerHandle::stop`]) removes the container.
 //!
-//! The docker path mirrors brain-db's `just serve-local`: it bind-mounts
-//! the already-bootstrapped BGE embedding model and disables the
-//! model-hungry tiers (rerank / classifier / llm) so the shard spawns
-//! embed-only instead of hard-failing when only the embed model is on disk.
-//! Suites that need those tiers point at an `external` server that has the
-//! full model set.
+//! The docker path boots the **full production capability stack**: it mounts
+//! the `brain-models` volume (embed + cross-encoder reranker + gliner NER,
+//! all provisioned by brain-db's `.devcontainer/bootstrap-model.sh`) and
+//! leaves every tier enabled — rerank and classifier load from those models,
+//! so the acceptance suite exercises the real read + extraction paths rather
+//! than a degraded server. The LLM tier is the one external dependency: it
+//! needs an API key (forwarded from `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` in
+//! the eval's environment) and degrades to a no-op without one, so it never
+//! blocks the shard from spawning.
 
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -50,9 +53,12 @@ pub struct DockerServerOpts {
     pub data_port: u16,
     /// Host port mapped to the container's metrics/health plane (`9091`).
     pub metrics_port: u16,
-    /// Host path to the BGE embedding model directory, bind-mounted
-    /// read-only into the container.
-    pub embed_model_dir: String,
+    /// Named docker volume holding the full model set (embed + reranker +
+    /// gliner), mounted read-only at `/models`. Provisioned by brain-db's
+    /// `.devcontainer/bootstrap-model.sh`. The three subdirectories
+    /// (`bge-small-en-v1.5`, `bge-reranker-base`, `gliner-small-v2.1`) are
+    /// pointed at via the model env vars.
+    pub models_volume: String,
     /// Per-shard arena size (env `BRAIN__SHARD__ARENA_CAPACITY_BYTES`).
     pub arena_capacity: String,
     /// Named docker volume to mount at the server's data dir
@@ -67,13 +73,12 @@ pub struct DockerServerOpts {
 
 impl Default for DockerServerOpts {
     fn default() -> Self {
-        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
         Self {
             image_tag: "latest".to_string(),
             container_name: "brain-eval-server".to_string(),
             data_port: 18080,
             metrics_port: 19091,
-            embed_model_dir: format!("{home}/.local/share/brain/models/bge-small-en-v1.5"),
+            models_volume: "brain-models".to_string(),
             arena_capacity: "256MiB".to_string(),
             data_volume: None,
             health_timeout: Duration::from_secs(120),
@@ -123,10 +128,9 @@ impl ServerHandle {
 
         let data_map = format!("{}:8080", opts.data_port);
         let metrics_map = format!("{}:9091", opts.metrics_port);
-        let model_mount = format!(
-            "{}:/models/bge-small-en-v1.5:ro",
-            opts.embed_model_dir
-        );
+        // The whole model volume mounts at /models; the env vars below point
+        // each tier at its subdirectory.
+        let model_mount = format!("{}:/models:ro", opts.models_volume);
         let arena_env = format!("BRAIN__SHARD__ARENA_CAPACITY_BYTES={}", opts.arena_capacity);
         let image = format!("brain:{}", opts.image_tag);
         // Optional persistent data volume (for restart-recovery).
@@ -134,6 +138,20 @@ impl ServerHandle {
             .data_volume
             .as_ref()
             .map(|v| format!("{v}:/var/lib/brain/data"));
+        // Forward an LLM provider key if the eval's environment has one. The
+        // LLM extractor tier degrades to a no-op without it (it never blocks
+        // boot), so this just lets statement/relation extraction activate when
+        // a key is available.
+        let llm_key_env: Option<String> = std::env::var("OPENAI_API_KEY")
+            .ok()
+            .filter(|v| !v.is_empty())
+            .map(|v| format!("OPENAI_API_KEY={v}"))
+            .or_else(|| {
+                std::env::var("ANTHROPIC_API_KEY")
+                    .ok()
+                    .filter(|v| !v.is_empty())
+                    .map(|v| format!("ANTHROPIC_API_KEY={v}"))
+            });
 
         let mut args: Vec<&str> = vec![
             "run",
@@ -141,9 +159,11 @@ impl ServerHandle {
             "--name",
             &opts.container_name,
             // io_uring under Docker Desktop's VM needs the default seccomp
-            // profile relaxed.
+            // profile relaxed AND the memlock rlimit raised.
             "--security-opt",
             "seccomp=unconfined",
+            "--ulimit",
+            "memlock=-1",
             "-p",
             &data_map,
             "-p",
@@ -155,22 +175,24 @@ impl ServerHandle {
             args.push("-v");
             args.push(mount);
         }
+        // Full capability stack: embed + reranker + gliner NER all load from
+        // the mounted volume; every tier stays enabled so the suite tests the
+        // real read + extraction paths.
         args.extend_from_slice(&[
             "-e",
             "BRAIN_EMBED_MODEL_DIR=/models/bge-small-en-v1.5",
             "-e",
+            "BRAIN_RERANK_MODEL_DIR=/models/bge-reranker-base",
+            "-e",
+            "BRAIN_NER_MODEL_PATH=/models/gliner-small-v2.1",
+            "-e",
             &arena_env,
-            // Embed-only: the host typically has just the BGE model, so the
-            // model-hungry tiers would hard-fail at spawn. Suites needing
-            // them use an external full-model server.
-            "-e",
-            "BRAIN__RERANK__ENABLED=false",
-            "-e",
-            "BRAIN__EXTRACTORS__CLASSIFIER__ENABLED=false",
-            "-e",
-            "BRAIN__EXTRACTORS__LLM__ENABLED=false",
-            &image,
         ]);
+        if let Some(key) = llm_key_env.as_deref() {
+            args.push("-e");
+            args.push(key);
+        }
+        args.push(&image);
         run_docker(&args).await?;
 
         let handle = Self {
