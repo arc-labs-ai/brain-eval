@@ -4,11 +4,13 @@
 //! - [`server`]    — `ServerHandle`: boot `brain:<tag>` in docker or attach
 //!   to an external server.
 //! - [`harness`]   — `BrainEvalHarness` wrapping `brain-db-sdk`.
+//! - [`metrics`]   — minimal `/metrics` scraper for the soak / storage gates.
 //! - [`synthesize`] — top-K → candidate answer.
 //! - [`runner`]    — `EvalRunner`: orchestrates ingest → recall → judge.
 
 pub mod config;
 pub mod harness;
+pub mod metrics;
 pub mod runner;
 pub mod server;
 pub mod synthesize;

@@ -25,7 +25,7 @@ use crate::scale::{
 };
 use crate::system::{
     kill_during_write, restart_recovery, run_core_scenarios, run_invariant_scenarios,
-    run_typed_graph_scenarios,
+    run_typed_graph_scenarios, storage_footprint,
 };
 
 /// One acceptance gate.
@@ -114,6 +114,15 @@ pub struct AcceptanceConfig {
     pub run_chaos: bool,
     /// Boot opts for the chaos server (unique ports / volume).
     pub chaos_opts: DockerServerOpts,
+    /// Run the storage-footprint gate (boots its own server on a volume).
+    pub run_storage: bool,
+    /// Boot opts for the storage server (unique ports / volume).
+    pub storage_opts: DockerServerOpts,
+    /// Memories to ingest for the storage-footprint gate.
+    pub storage_n: usize,
+    /// Disk-budget ceiling (bytes/memory) for the storage gate; `None` =
+    /// informational (the dev-box default).
+    pub storage_max_bytes_per_memory: Option<f64>,
 }
 
 impl AcceptanceConfig {
@@ -134,6 +143,53 @@ impl AcceptanceConfig {
             recovery_opts: DockerServerOpts::default(),
             run_chaos: false,
             chaos_opts: DockerServerOpts::default(),
+            run_storage: false,
+            storage_opts: DockerServerOpts::default(),
+            storage_n: 2_000,
+            storage_max_bytes_per_memory: None,
+        }
+    }
+
+    /// The reference-hardware acceptance config at the spec's primary scale
+    /// (1M memories + 500K statements, §19/06). The perf gates carry their
+    /// spec meaning here; the storage gate enforces the ~10 KB/memory disk
+    /// budget. Meant for a quiet 16-core / 64 GiB / NVMe box — it is far too
+    /// heavy for an emulated dev container.
+    #[must_use]
+    pub fn full_scale(endpoint: SocketAddr) -> Self {
+        let volume_opts = |name: &str, data_port, metrics_port, vol: &str| DockerServerOpts {
+            container_name: name.to_string(),
+            data_port,
+            metrics_port,
+            data_volume: Some(vol.to_string()),
+            // 1M slots × 1600 B ≈ 1.6 GiB of arena; size with headroom.
+            arena_capacity: "2GiB".to_string(),
+            ..DockerServerOpts::default()
+        };
+        Self {
+            endpoint,
+            scale: ScaleConfig {
+                ingest_n: 1_000_000,
+                probe_n: 1_000,
+                top_k: 10,
+            },
+            concurrent: ConcurrentConfig::default(),
+            recall_n: 10_000,
+            recall_top_k: 10,
+            run_restart_recovery: true,
+            recovery_opts: volume_opts(
+                "brain-acc-recovery",
+                28080,
+                29091,
+                "brain-acc-recovery-data",
+            ),
+            run_chaos: true,
+            chaos_opts: volume_opts("brain-acc-chaos", 28081, 29092, "brain-acc-chaos-data"),
+            run_storage: true,
+            storage_opts: volume_opts("brain-acc-storage", 28082, 29093, "brain-acc-storage-data"),
+            storage_n: 1_000_000,
+            // Spec disk budget: ~8-10 GB per shard at 1M ⇒ ≤ ~10 KiB/memory.
+            storage_max_bytes_per_memory: Some(10.0 * 1024.0),
         }
     }
 }
@@ -295,6 +351,22 @@ pub async fn run_acceptance(cfg: AcceptanceConfig) -> AcceptanceReport {
     // --- kill-during-write chaos (correctness gate; boots its own server) ---
     if cfg.run_chaos {
         let o = kill_during_write(cfg.chaos_opts.clone()).await;
+        gates.push(Gate {
+            name: o.name.to_string(),
+            perf: false,
+            passed: o.passed,
+            detail: o.detail,
+        });
+    }
+
+    // --- storage footprint (correctness gate; boots its own server) ---
+    if cfg.run_storage {
+        let o = storage_footprint(
+            cfg.storage_opts.clone(),
+            cfg.storage_n,
+            cfg.storage_max_bytes_per_memory,
+        )
+        .await;
         gates.push(Gate {
             name: o.name.to_string(),
             perf: false,
