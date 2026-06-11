@@ -42,7 +42,10 @@ async fn typed_graph_scenarios_all_pass() {
     let outcomes = run_typed_graph_scenarios(server.endpoint()).await;
     server.stop().await;
 
-    assert!(!outcomes.is_empty(), "expected typed-graph scenarios to run");
+    assert!(
+        !outcomes.is_empty(),
+        "expected typed-graph scenarios to run"
+    );
     let mut failed = Vec::new();
     for o in &outcomes {
         println!(
@@ -55,5 +58,8 @@ async fn typed_graph_scenarios_all_pass() {
             failed.push(o.name);
         }
     }
-    assert!(failed.is_empty(), "typed-graph scenarios failed: {failed:?}");
+    assert!(
+        failed.is_empty(),
+        "typed-graph scenarios failed: {failed:?}"
+    );
 }

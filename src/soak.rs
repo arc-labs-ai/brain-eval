@@ -83,7 +83,10 @@ impl SoakReport {
     pub fn healthy(&self) -> bool {
         self.total_errors == 0
             && !self.samples.is_empty()
-            && self.samples.iter().all(|s| s.recall_at_1 >= self.recall_floor)
+            && self
+                .samples
+                .iter()
+                .all(|s| s.recall_at_1 >= self.recall_floor)
     }
 
     /// Human-readable summary.
@@ -242,7 +245,10 @@ mod tests {
             recall_floor: 0.90,
             ..ok.clone()
         };
-        assert!(!drifted.healthy(), "recall dropping below floor is unhealthy");
+        assert!(
+            !drifted.healthy(),
+            "recall dropping below floor is unhealthy"
+        );
 
         let errored = SoakReport {
             total_errors: 3,

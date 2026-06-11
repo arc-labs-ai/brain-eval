@@ -44,9 +44,8 @@ async fn run(endpoint: SocketAddr) -> Result<ScenarioOutcome, HarnessError> {
     // tokens stay capitalized (the hex marker itself is lowercase and
     // would NOT match the pattern, so we map id bytes to A-Z letters).
     let full_name = unique_person_name(h.agent_id());
-    let text = format!(
-        "During the project kickoff, {full_name} agreed to lead the migration effort."
-    );
+    let text =
+        format!("During the project kickoff, {full_name} agreed to lead the migration effort.");
 
     // Encode; deduplicate(false) so the extractor stages always enqueue.
     let enc = h
@@ -56,9 +55,10 @@ async fn run(endpoint: SocketAddr) -> Result<ScenarioOutcome, HarnessError> {
 
     // If the server reports no extractor stage was queued, extraction is
     // disabled on this deployment — skip the assertion honestly.
-    let extractor_queued = enc.pending_stages.iter().any(|s| {
-        matches!(s, brain_db_sdk::wire::types::StageKind::Extractor)
-    });
+    let extractor_queued = enc
+        .pending_stages
+        .iter()
+        .any(|s| matches!(s, brain_db_sdk::wire::types::StageKind::Extractor));
     if !extractor_queued {
         h.close().await?;
         return Ok(ScenarioOutcome::fail(

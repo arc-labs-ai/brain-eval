@@ -228,15 +228,10 @@ impl ServerHandle {
     async fn wait_healthy(&self, name: &str, timeout: Duration) -> Result<(), ServerError> {
         let deadline = Instant::now() + timeout;
         loop {
-            let status = run_docker(&[
-                "inspect",
-                "-f",
-                "{{.State.Health.Status}}",
-                name,
-            ])
-            .await
-            .map(|out| out.trim().to_string())
-            .unwrap_or_default();
+            let status = run_docker(&["inspect", "-f", "{{.State.Health.Status}}", name])
+                .await
+                .map(|out| out.trim().to_string())
+                .unwrap_or_default();
 
             if status == "healthy" {
                 return Ok(());

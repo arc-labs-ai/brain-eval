@@ -63,11 +63,7 @@ impl Reporter for TextReporter {
 
         if let Some(r) = &m.retrieval {
             writeln!(f, "Retrieval quality")?;
-            writeln!(
-                f,
-                "  Recall@1  : {:.4}",
-                r.recall_at_1
-            )?;
+            writeln!(f, "  Recall@1  : {:.4}", r.recall_at_1)?;
             writeln!(
                 f,
                 "  Recall@5  : {:.4}    Recall@10 : {:.4}",

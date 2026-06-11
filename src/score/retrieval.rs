@@ -34,7 +34,9 @@ pub struct RetrievalStats {
 /// question returned any retrieved memories.
 #[must_use]
 pub fn compute_retrieval_stats(results: &[QuestionResult]) -> Option<RetrievalStats> {
-    let any_retrieved = results.iter().any(|r| !r.retrieved_memory_contents.is_empty());
+    let any_retrieved = results
+        .iter()
+        .any(|r| !r.retrieved_memory_contents.is_empty());
     if !any_retrieved {
         return None;
     }

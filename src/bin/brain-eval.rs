@@ -16,6 +16,7 @@
 use std::net::SocketAddr;
 use std::process::ExitCode;
 
+use brain_eval::acceptance::{run_acceptance, AcceptanceConfig};
 use brain_eval::core::benchmark::Benchmark;
 use brain_eval::datasets::{
     dmr::DmrBenchmark, locomo::LocomoBenchmark, longmemeval::LongMemEvalS, smoke::SmokeBenchmark,
@@ -24,7 +25,6 @@ use brain_eval::report::{
     dmr_competitor_baselines, locomo_competitor_baselines, longmemeval_s_competitor_baselines,
     smoke_competitor_baselines, CompetitorBaselines,
 };
-use brain_eval::acceptance::{run_acceptance, AcceptanceConfig};
 use brain_eval::run::{EvalRunner, RunConfig};
 use brain_eval::soak::{run_soak, SoakConfig};
 
@@ -103,7 +103,10 @@ async fn async_main() -> ExitCode {
     println!("  endpoint : {}", config.endpoint);
     println!();
 
-    match EvalRunner::new(config, competitors).run(benchmark.as_ref()).await {
+    match EvalRunner::new(config, competitors)
+        .run(benchmark.as_ref())
+        .await
+    {
         Ok(report) => {
             print_summary(&report);
             ExitCode::SUCCESS
@@ -235,7 +238,10 @@ fn print_summary(report: &brain_eval::report::BenchmarkReport) {
     }
     println!(
         "latency   : write p50/p95 {}/{} ms    read p50/p95 {}/{} ms",
-        m.latency.write_p50_ms, m.latency.write_p95_ms, m.latency.read_p50_ms, m.latency.read_p95_ms,
+        m.latency.write_p50_ms,
+        m.latency.write_p95_ms,
+        m.latency.read_p50_ms,
+        m.latency.read_p95_ms,
     );
 }
 

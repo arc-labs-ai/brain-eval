@@ -69,11 +69,10 @@ impl Benchmark for DmrBenchmark {
             if trimmed.is_empty() || trimmed.starts_with('#') {
                 continue;
             }
-            let row: DmrRow =
-                serde_json::from_str(trimmed).map_err(|e| EvalError::ParseError {
-                    path: path.display().to_string(),
-                    reason: format!("line {}: {e}", lineno + 1),
-                })?;
+            let row: DmrRow = serde_json::from_str(trimmed).map_err(|e| EvalError::ParseError {
+                path: path.display().to_string(),
+                reason: format!("line {}: {e}", lineno + 1),
+            })?;
             out.push(row.into_eval_instance());
         }
         Ok(out)

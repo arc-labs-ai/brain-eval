@@ -169,7 +169,9 @@ impl EvalRunner {
         write_deduplicated: u64,
         ingestion_failed: bool,
     ) -> QuestionResult {
-        let recall = harness.recall(&instance.question, self.config.top_k_retrieve).await;
+        let recall = harness
+            .recall(&instance.question, self.config.top_k_retrieve)
+            .await;
         let (hits, read_latency_ms, retrieval_failed) = match recall {
             Ok(o) => (o.hits, o.latency_ms, false),
             Err(e) => {
@@ -182,8 +184,7 @@ impl EvalRunner {
             }
         };
 
-        let retrieved_memory_contents: Vec<String> =
-            hits.iter().map(|m| m.text.clone()).collect();
+        let retrieved_memory_contents: Vec<String> = hits.iter().map(|m| m.text.clone()).collect();
         let memories_retrieved = hits.len();
 
         #[allow(clippy::cast_possible_truncation)]

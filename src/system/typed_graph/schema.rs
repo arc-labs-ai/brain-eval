@@ -8,10 +8,8 @@
 
 use std::net::SocketAddr;
 
-use brain_db_sdk::wire::types::{
-    SchemaGetRequest, SchemaUploadRequest, SchemaValidateRequest,
-};
 use brain_db_sdk::new_id;
+use brain_db_sdk::wire::types::{SchemaGetRequest, SchemaUploadRequest, SchemaValidateRequest};
 
 use super::super::ScenarioOutcome;
 use super::hex16;
@@ -80,7 +78,10 @@ async fn run(endpoint: SocketAddr) -> Result<ScenarioOutcome, HarnessError> {
         h.close().await?;
         return Ok(ScenarioOutcome::fail(
             NAME,
-            format!("upload returned namespace {:?}, expected {:?}", up.namespace, ns),
+            format!(
+                "upload returned namespace {:?}, expected {:?}",
+                up.namespace, ns
+            ),
         ));
     }
     if up.schema_version == 0 {
@@ -104,7 +105,10 @@ async fn run(endpoint: SocketAddr) -> Result<ScenarioOutcome, HarnessError> {
         h.close().await?;
         return Ok(ScenarioOutcome::fail(
             NAME,
-            format!("get returned namespace {:?}, expected {:?}", got.namespace, ns),
+            format!(
+                "get returned namespace {:?}, expected {:?}",
+                got.namespace, ns
+            ),
         ));
     }
     if got.schema_version != uploaded_version {

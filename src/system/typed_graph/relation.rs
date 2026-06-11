@@ -132,8 +132,7 @@ async fn run(endpoint: SocketAddr) -> Result<ScenarioOutcome, HarnessError> {
 }
 
 async fn make_person(h: &BrainEvalHarness, canonical: &str) -> Result<[u8; 16], HarnessError> {
-    Ok(h
-        .client()
+    Ok(h.client()
         .create_entity(&EntityCreateRequest {
             entity_type_id: PERSON_TYPE_ID,
             canonical_name: canonical.to_string(),

@@ -73,9 +73,7 @@ impl Benchmark for LongMemEvalS {
     }
 
     fn load(&self, datasets_dir: &Path) -> Result<Vec<EvalInstance>, EvalError> {
-        let path = datasets_dir
-            .join("longmemeval")
-            .join("longmemeval_s.json");
+        let path = datasets_dir.join("longmemeval").join("longmemeval_s.json");
         let bytes = std::fs::read(&path).map_err(|_| EvalError::DatasetNotFound {
             path: path.display().to_string(),
         })?;

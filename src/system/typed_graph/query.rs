@@ -163,7 +163,11 @@ async fn run(endpoint: SocketAddr) -> Result<ScenarioOutcome, HarnessError> {
     let mem_text = format!("The {token} protocol governs deep-sea telemetry relays.");
     let mem_id = h
         .client()
-        .encode(&EncodeBuilder::new(mem_text.as_str()).deduplicate(false).build())
+        .encode(
+            &EncodeBuilder::new(mem_text.as_str())
+                .deduplicate(false)
+                .build(),
+        )
         .await?
         .memory_id;
 

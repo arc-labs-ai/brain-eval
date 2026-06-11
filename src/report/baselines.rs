@@ -79,8 +79,9 @@ pub fn locomo_competitor_baselines() -> Vec<CompetitorRow> {
             system: "GPT-4 (full-context)".into(),
             accuracy: 0.58,
             source: "Maharana et al., LoCoMo, ACL 2024 — Table 3".into(),
-            note: "Full-context baseline. Cross-comparable; uses the standard 5-category denominator."
-                .into(),
+            note:
+                "Full-context baseline. Cross-comparable; uses the standard 5-category denominator."
+                    .into(),
         },
         CompetitorRow {
             system: "Zep (reported)".into(),

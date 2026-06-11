@@ -63,18 +63,78 @@ const CORPUS: &[&str] = &[
 /// substring is verbatim-unique to one corpus memory; the
 /// `corpus_uniqueness` test enforces that invariant at build time.
 const QUESTIONS: &[(&str, &str, &str, QuestionType)] = &[
-    ("smoke-01", "Who leads the payments team at Aurora?", "leads the payments platform team", QuestionType::SingleHop),
-    ("smoke-02", "What language does Sarah prefer for backend work?", "prefers Rust over Go", QuestionType::Preference),
-    ("smoke-03", "What does Sarah think about morning meetings?", "dislikes synchronous daily standup", QuestionType::Preference),
-    ("smoke-04", "When did the Phoenix project ship its first service?", "invoice generator", QuestionType::Temporal),
-    ("smoke-05", "Who is the technical lead of Phoenix?", "technical lead of the Phoenix project", QuestionType::SingleHop),
-    ("smoke-06", "How much did Aurora raise in its Series B?", "40 million dollar Series B", QuestionType::SingleHop),
-    ("smoke-07", "How was Aurora Robotics funded?", "Sequoia Capital", QuestionType::SingleHop),
-    ("smoke-08", "What music does Sarah practice?", "learning to play the cello", QuestionType::Preference),
-    ("smoke-09", "Who handles incident response at Aurora?", "staff site reliability engineer", QuestionType::SingleHop),
-    ("smoke-10", "What databases does Aurora use?", "PostgreSQL for transactional data", QuestionType::SingleHop),
-    ("smoke-11", "How does Sarah debug regressions?", "bisecting with git", QuestionType::Preference),
-    ("smoke-12", "What is the biggest risk in the Phoenix migration?", "dual-write consistency", QuestionType::MultiHop),
+    (
+        "smoke-01",
+        "Who leads the payments team at Aurora?",
+        "leads the payments platform team",
+        QuestionType::SingleHop,
+    ),
+    (
+        "smoke-02",
+        "What language does Sarah prefer for backend work?",
+        "prefers Rust over Go",
+        QuestionType::Preference,
+    ),
+    (
+        "smoke-03",
+        "What does Sarah think about morning meetings?",
+        "dislikes synchronous daily standup",
+        QuestionType::Preference,
+    ),
+    (
+        "smoke-04",
+        "When did the Phoenix project ship its first service?",
+        "invoice generator",
+        QuestionType::Temporal,
+    ),
+    (
+        "smoke-05",
+        "Who is the technical lead of Phoenix?",
+        "technical lead of the Phoenix project",
+        QuestionType::SingleHop,
+    ),
+    (
+        "smoke-06",
+        "How much did Aurora raise in its Series B?",
+        "40 million dollar Series B",
+        QuestionType::SingleHop,
+    ),
+    (
+        "smoke-07",
+        "How was Aurora Robotics funded?",
+        "Sequoia Capital",
+        QuestionType::SingleHop,
+    ),
+    (
+        "smoke-08",
+        "What music does Sarah practice?",
+        "learning to play the cello",
+        QuestionType::Preference,
+    ),
+    (
+        "smoke-09",
+        "Who handles incident response at Aurora?",
+        "staff site reliability engineer",
+        QuestionType::SingleHop,
+    ),
+    (
+        "smoke-10",
+        "What databases does Aurora use?",
+        "PostgreSQL for transactional data",
+        QuestionType::SingleHop,
+    ),
+    (
+        "smoke-11",
+        "How does Sarah debug regressions?",
+        "bisecting with git",
+        QuestionType::Preference,
+    ),
+    (
+        "smoke-12",
+        "What is the biggest risk in the Phoenix migration?",
+        "dual-write consistency",
+        QuestionType::MultiHop,
+    ),
 ];
 
 impl SmokeBenchmark {

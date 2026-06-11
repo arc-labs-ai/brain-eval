@@ -90,11 +90,7 @@ async fn run_restart_recovery(
             .recall(&marker, (N as u32) * 2)
             .await
             .map_err(|e| format!("recall after restart: {e}"))?;
-        let hits = out
-            .hits
-            .iter()
-            .filter(|m| m.text.contains(&marker))
-            .count();
+        let hits = out.hits.iter().filter(|m| m.text.contains(&marker)).count();
         h.close().await.map_err(|e| format!("close #2: {e}"))?;
         hits
     };

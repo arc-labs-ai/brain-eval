@@ -79,7 +79,11 @@ async fn run_isolation(endpoint: SocketAddr) -> Result<ScenarioOutcome, HarnessE
     let secret = format!("{marker}: the vault code is alpha-tango-niner");
     agent_a
         .client()
-        .encode(&EncodeBuilder::new(secret.as_str()).deduplicate(false).build())
+        .encode(
+            &EncodeBuilder::new(secret.as_str())
+                .deduplicate(false)
+                .build(),
+        )
         .await?;
 
     let b_hits = agent_b.recall(&marker, 10).await?;
@@ -190,9 +194,7 @@ async fn run_txn(endpoint: SocketAddr) -> Result<ScenarioOutcome, HarnessError> 
     in_txn.txn_id = Some(txn_id);
     let in_txn_hits = h.client().recall(&in_txn).await?;
 
-    h.client()
-        .txn_commit(&TxnCommitRequest { txn_id })
-        .await?;
+    h.client().txn_commit(&TxnCommitRequest { txn_id }).await?;
 
     // After commit, a plain (no-txn) read must see it.
     let after = h.recall(&marker, 10).await?;

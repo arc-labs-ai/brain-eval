@@ -25,7 +25,11 @@ use brain_eval::score::judge::judge_answer_heuristic;
 fn deterministic_single_hop(n: usize) -> Vec<EvalInstance> {
     let templates: &[(&str, &str, &str)] = &[
         ("Paris", "I live in Paris.", "What city do I live in?"),
-        ("blue", "My favourite colour is blue.", "What is my favourite colour?"),
+        (
+            "blue",
+            "My favourite colour is blue.",
+            "What is my favourite colour?",
+        ),
         ("Toyota", "I drive a Toyota.", "What car do I drive?"),
     ];
     (0..n)
