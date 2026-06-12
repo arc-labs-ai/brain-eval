@@ -14,7 +14,7 @@
 //! LongMemEval / LoCoMo shape.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use tracing::warn;
 
@@ -155,6 +155,19 @@ impl EvalRunner {
 
         let mut question_results: Vec<QuestionResult> = Vec::with_capacity(instances.len());
 
+        // Incremental tracking: append each result to a JSONL sidecar and
+        // print a running tally as we go, so an interrupted or crashed run
+        // still leaves partial metrics on disk instead of nothing.
+        if let Err(e) = std::fs::create_dir_all(&self.config.output_dir) {
+            warn!(error = %e, "could not create output dir; incremental results disabled");
+        }
+        let mut tracker = IncrementalTracker::new(&self.config.output_dir, &meta);
+        println!(
+            "eval: {} questions; streaming partial results to {}",
+            tracker.total,
+            tracker.path.display()
+        );
+
         for (conv_key, idxs) in &groups {
             let harness = match BrainEvalHarness::connect(self.config.endpoint).await {
                 Ok(h) => h,
@@ -166,11 +179,13 @@ impl EvalRunner {
                     );
                     for &idx in idxs {
                         let inst = &instances[idx];
-                        question_results.push(failed_question_result(
+                        let r = failed_question_result(
                             inst,
                             format!("connect failed: {e}"),
                             /* ingest_failed = */ true,
-                        ));
+                        );
+                        tracker.record(&r);
+                        question_results.push(r);
                     }
                     continue;
                 }
@@ -184,8 +199,8 @@ impl EvalRunner {
             // ---- per-question retrieval + judging ----
             for &idx in idxs {
                 let inst = &instances[idx];
-                question_results.push(
-                    self.run_question(
+                let r = self
+                    .run_question(
                         &harness,
                         inst,
                         write_latency_ms,
@@ -194,8 +209,9 @@ impl EvalRunner {
                         write_deduplicated,
                         ingest_err,
                     )
-                    .await,
-                );
+                    .await;
+                tracker.record(&r);
+                question_results.push(r);
             }
 
             // ---- close harness (best-effort) ----
@@ -293,6 +309,79 @@ impl EvalRunner {
             }
         }
         Ok(())
+    }
+}
+
+/// Streams per-question results to a JSONL sidecar as the run progresses
+/// and prints a running tally. The point is durability of *partial*
+/// results: if the run is interrupted (crash, Ctrl-C, server death) the
+/// `.partial.jsonl` file still holds every question graded so far, so the
+/// metrics aren't all-or-nothing on the final report write.
+struct IncrementalTracker {
+    /// `<output_dir>/<benchmark_id>-<run_started_unix_nanos>.partial.jsonl`.
+    path: PathBuf,
+    /// Instances loaded for this run (denominator for progress).
+    total: usize,
+    /// Questions recorded so far.
+    done: usize,
+    /// Running sum of judge scores (numerator for running accuracy).
+    score_sum: f64,
+}
+
+impl IncrementalTracker {
+    fn new(output_dir: &Path, meta: &BenchmarkMeta) -> Self {
+        let path = output_dir.join(format!(
+            "{}-{}.partial.jsonl",
+            meta.benchmark_id, meta.run_started_unix_nanos
+        ));
+        Self {
+            path,
+            total: meta.instance_count,
+            done: 0,
+            score_sum: 0.0,
+        }
+    }
+
+    /// Append one result as a JSON line and print a progress line. Both
+    /// are best-effort: a write failure warns but never aborts the run.
+    fn record(&mut self, result: &QuestionResult) {
+        self.done += 1;
+        self.score_sum += result.score;
+        #[allow(clippy::cast_precision_loss)]
+        let running_acc = self.score_sum / self.done as f64;
+
+        if let Err(e) = self.append_line(result) {
+            warn!(path = %self.path.display(), error = %e, "incremental result append failed");
+        }
+
+        let flag = if result.ingestion_failed {
+            " INGEST-FAIL"
+        } else if result.retrieval_failed {
+            " RETRIEVAL-FAIL"
+        } else {
+            ""
+        };
+        println!(
+            "[{:>4}/{}] {:<9} acc={:.3} q={}{}",
+            self.done,
+            self.total,
+            format!("{:?}", result.verdict),
+            running_acc,
+            result.question_id,
+            flag,
+        );
+    }
+
+    fn append_line(&self, result: &QuestionResult) -> std::io::Result<()> {
+        use std::io::Write;
+        let line = serde_json::to_string(result)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)?;
+        writeln!(f, "{line}")?;
+        f.flush()
     }
 }
 
