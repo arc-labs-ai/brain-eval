@@ -154,8 +154,12 @@ struct LocomoQa {
     question: String,
     // LoCoMo answers are usually strings but are sometimes bare numbers
     // (a year, a count) or booleans; accept any scalar and stringify it.
-    #[serde(deserialize_with = "scalar_to_string")]
+    // Adversarial (category 5) questions omit `answer` entirely and carry
+    // `adversarial_answer` instead — `default` covers the missing case.
+    #[serde(default, deserialize_with = "scalar_to_string")]
     answer: String,
+    #[serde(default, deserialize_with = "scalar_to_string")]
+    adversarial_answer: String,
     #[serde(default)]
     category: Option<u8>,
 }
@@ -208,10 +212,16 @@ impl LocomoSample {
         for (idx, qa) in self.qa.into_iter().enumerate() {
             let question_id = format!("{}-{idx:04}", self.sample_id);
             let question_type = map_category(qa.category);
+            // Adversarial questions carry `adversarial_answer`, not `answer`.
+            let answer = if qa.answer.is_empty() {
+                qa.adversarial_answer
+            } else {
+                qa.answer
+            };
             out.push(EvalInstance {
                 question_id,
                 question: qa.question,
-                answer: qa.answer,
+                answer,
                 question_type,
                 conversation_id: Some(conv_id.clone()),
                 sessions: sessions.clone(),
