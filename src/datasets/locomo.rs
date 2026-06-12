@@ -128,12 +128,12 @@ impl Benchmark for LocomoBenchmark {
 struct LocomoSample {
     #[serde(default = "default_sample_id")]
     sample_id: String,
-    /// Map keyed by session label (e.g. `"session_1"`, `"session_2"`)
-    /// → turns. Using `BTreeMap` keeps ingest order deterministic
-    /// (lexicographic by session label, which matches the natural
-    /// `session_1` < `session_2` < ... ordering).
+    /// The `conversation` object mixes `session_<N>` turn arrays with
+    /// scalar metadata under the same map (`speaker_a`, `speaker_b`,
+    /// `session_<N>_date_time`), so values are heterogeneous — keep them as
+    /// raw JSON and pick out the session arrays in `expand_into`.
     #[serde(default)]
-    conversation: BTreeMap<String, Vec<LocomoTurn>>,
+    conversation: BTreeMap<String, serde_json::Value>,
     #[serde(default)]
     qa: Vec<LocomoQa>,
 }
@@ -193,19 +193,28 @@ impl LocomoSample {
         let sessions: Vec<Session> = self
             .conversation
             .into_iter()
-            .map(|(session_label, turns)| Session {
-                session_id: session_label,
-                turns: turns
-                    .into_iter()
-                    .map(|t| TurnRecord {
-                        // Map every speaker to a `user` turn so the
-                        // ingest helper accepts both sides — both
-                        // contribute facts. Prefix the speaker name
-                        // so the substrate text preserves attribution.
-                        role: "user".to_owned(),
-                        content: format!("{}: {}", t.speaker, t.text),
-                    })
-                    .collect(),
+            .filter_map(|(label, value)| {
+                // Keep only `session_<N>` turn arrays; skip the scalar
+                // metadata (`speaker_a`, `session_<N>_date_time`, …).
+                let rest = label.strip_prefix("session_")?;
+                if rest.is_empty() || !rest.bytes().all(|b| b.is_ascii_digit()) {
+                    return None;
+                }
+                let turns: Vec<LocomoTurn> = serde_json::from_value(value).ok()?;
+                Some(Session {
+                    session_id: label,
+                    turns: turns
+                        .into_iter()
+                        .map(|t| TurnRecord {
+                            // Map every speaker to a `user` turn so the
+                            // ingest helper accepts both sides — both
+                            // contribute facts. Prefix the speaker name
+                            // so the substrate text preserves attribution.
+                            role: "user".to_owned(),
+                            content: format!("{}: {}", t.speaker, t.text),
+                        })
+                        .collect(),
+                })
             })
             .collect();
 
