@@ -142,10 +142,10 @@ struct LocomoSample {
 struct LocomoTurn {
     speaker: String,
     text: String,
-    // `date_time` exists in the release but the loader doesn't use
-    // it yet — temporal handling lives in the substrate.
+    // Per-turn timestamp when present; otherwise the session-level
+    // `session_<N>_date_time` is used. Stamped into the ingested text so
+    // temporal questions have an absolute date to retrieve.
     #[serde(default)]
-    #[allow(dead_code)]
     date_time: Option<String>,
 }
 
@@ -184,36 +184,65 @@ fn default_sample_id() -> String {
     "sample-0".to_owned()
 }
 
+/// `true` for a `session_<N>` turn-array key (all-digit suffix), not the
+/// `session_<N>_date_time` scalar or the `speaker_*` metadata.
+fn is_session_label(label: &str) -> bool {
+    match label.strip_prefix("session_") {
+        Some(rest) => !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit()),
+        None => false,
+    }
+}
+
 impl LocomoSample {
     fn expand_into(self, out: &mut Vec<EvalInstance>) {
         let conv_id = self.sample_id.clone();
 
+        // The conversation map interleaves `session_<N>` turn arrays with
+        // scalar metadata: `speaker_a/b` and, crucially, the per-session
+        // timestamp at `session_<N>_date_time`. Split the two so we can
+        // stamp each turn with its session date — LoCoMo's temporal
+        // questions ("When did X happen?") need an absolute date in the
+        // ingested text, or the conversation only says "yesterday".
+        let mut session_arrays: Vec<(String, serde_json::Value)> = Vec::new();
+        let mut session_dates: BTreeMap<String, String> = BTreeMap::new();
+        for (label, value) in self.conversation {
+            if let Some(session) = label.strip_suffix("_date_time") {
+                if let serde_json::Value::String(date) = value {
+                    session_dates.insert(session.to_owned(), date);
+                }
+            } else if is_session_label(&label) {
+                session_arrays.push((label, value));
+            }
+            // else: speaker_a / speaker_b and any other scalar metadata.
+        }
+
         // Build sessions once per sample; every QA in this sample
         // re-uses them via shared `conversation_id`.
-        let sessions: Vec<Session> = self
-            .conversation
+        let sessions: Vec<Session> = session_arrays
             .into_iter()
             .filter_map(|(label, value)| {
-                // Keep only `session_<N>` turn arrays; skip the scalar
-                // metadata (`speaker_a`, `session_<N>_date_time`, …).
-                let rest = label.strip_prefix("session_")?;
-                if rest.is_empty() || !rest.bytes().all(|b| b.is_ascii_digit()) {
-                    return None;
-                }
                 let turns: Vec<LocomoTurn> = serde_json::from_value(value).ok()?;
+                let session_date = session_dates.get(&label).cloned();
                 Some(Session {
-                    session_id: label,
                     turns: turns
                         .into_iter()
-                        .map(|t| TurnRecord {
-                            // Map every speaker to a `user` turn so the
-                            // ingest helper accepts both sides — both
-                            // contribute facts. Prefix the speaker name
-                            // so the substrate text preserves attribution.
-                            role: "user".to_owned(),
-                            content: format!("{}: {}", t.speaker, t.text),
+                        .map(|t| {
+                            // Prefer a per-turn timestamp; fall back to the
+                            // session's. Map every speaker to a `user` turn
+                            // (both sides contribute facts) and prefix the
+                            // speaker name to preserve attribution.
+                            let when = t.date_time.as_deref().or(session_date.as_deref());
+                            let content = match when {
+                                Some(date) => format!("[{date}] {}: {}", t.speaker, t.text),
+                                None => format!("{}: {}", t.speaker, t.text),
+                            };
+                            TurnRecord {
+                                role: "user".to_owned(),
+                                content,
+                            }
                         })
                         .collect(),
+                    session_id: label,
                 })
             })
             .collect();
@@ -263,10 +292,13 @@ mod tests {
             {
                 "sample_id": "sample-0",
                 "conversation": {
+                    "speaker_a": "Alice",
+                    "speaker_b": "Bob",
                     "session_1": [
                         {"speaker": "Alice", "text": "Hi Bob.", "date_time": "2024-01-01"},
                         {"speaker": "Bob", "text": "Hey."}
                     ],
+                    "session_2_date_time": "2024-02-02",
                     "session_2": [
                         {"speaker": "Alice", "text": "Did you finish the report?"}
                     ]
@@ -310,16 +342,32 @@ mod tests {
     }
 
     #[test]
-    fn speaker_prefix_preserved_in_turn_content() {
+    fn turn_content_is_date_stamped_and_attributed() {
         let samples: Vec<LocomoSample> = serde_json::from_str(sample_text()).expect("parse");
         let mut out = Vec::new();
         for s in samples {
             s.expand_into(&mut out);
         }
+        // session_1 turn carries a per-turn date.
         let first_turn = &out[0].sessions[0].turns[0];
         assert_eq!(first_turn.role, "user");
-        assert!(first_turn.content.starts_with("Alice:"));
-        assert!(first_turn.content.contains("Hi Bob."));
+        assert_eq!(first_turn.content, "[2024-01-01] Alice: Hi Bob.");
+        // session_2 turn has no per-turn date → falls back to the
+        // session-level `session_2_date_time`.
+        let s2_turn = &out[0].sessions[1].turns[0];
+        assert!(s2_turn.content.starts_with("[2024-02-02] Alice:"));
+        assert!(s2_turn.content.contains("Did you finish the report?"));
+    }
+
+    #[test]
+    fn speaker_metadata_is_not_a_session() {
+        // `speaker_a` / `speaker_b` scalars must not become sessions.
+        let samples: Vec<LocomoSample> = serde_json::from_str(sample_text()).expect("parse");
+        let mut out = Vec::new();
+        for s in samples {
+            s.expand_into(&mut out);
+        }
+        assert_eq!(out[0].sessions.len(), 2);
     }
 
     #[test]
