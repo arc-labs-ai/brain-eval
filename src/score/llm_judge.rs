@@ -22,8 +22,10 @@ use crate::core::outcome::{JudgeResult, Verdict};
 use crate::llm::{truncate, LlmClient};
 use crate::score::judge::judge_answer_heuristic;
 
-/// Tokens for the verdict JSON — small; the reply is a one-liner.
-const MAX_TOKENS: u32 = 256;
+/// Token budget for the verdict JSON. Generous so a verbose `reasoning`
+/// can't get truncated mid-object (which would leave the JSON unclosed and
+/// unparseable, forcing a heuristic fallback).
+const MAX_TOKENS: u32 = 512;
 
 /// A configured LLM grader.
 pub struct LlmJudge {
