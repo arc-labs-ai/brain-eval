@@ -118,6 +118,8 @@ impl LlmClient {
         let body = serde_json::json!({
             "model": self.model,
             "max_tokens": max_tokens,
+            // Deterministic grading/synthesis for reproducible eval numbers.
+            "temperature": 0,
             "messages": [{ "role": "user", "content": prompt }],
         });
         let resp = self
