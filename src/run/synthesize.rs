@@ -98,8 +98,21 @@ impl LlmSynthesizer {
         }
         let prompt = format!(
             "Answer the question using ONLY the retrieved memory snippets below. \
-             Be concise and direct — give just the answer, not an explanation. \
-             If the snippets do not contain the answer, reply exactly \"I don't know.\"\n\n\
+             Each snippet is prefixed with the date it was said, e.g. \
+             \"[8 May, 2023] Alice: ...\".\n\n\
+             Rules:\n\
+             - Give just the answer, concise and direct — no explanation.\n\
+             - TIME: when the question asks \"when\", resolve any relative time \
+             expression (\"yesterday\", \"last week\", \"this month\", \"N years/months \
+             ago\") against the bracketed date of the snippet that states it, and \
+             answer with the absolute date. Example: \"this month\" said on \
+             [3 July, 2023] means July 2023; \"4 years ago\" said in 2023 means 2019.\n\
+             - LISTS: when the question asks for multiple things or a set (e.g. \
+             \"what activities\", \"where has she ...\", \"which ...\"), gather EVERY \
+             matching item across ALL snippets and answer with the full \
+             comma-separated list, not just the first one.\n\
+             - If the snippets genuinely do not contain the answer, reply exactly \
+             \"I don't know.\"\n\n\
              Question: {question}\n\n\
              Memories:\n{}\n\
              Answer:",
