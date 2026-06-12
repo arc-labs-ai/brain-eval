@@ -17,6 +17,7 @@
 //! that one question rather than aborting the run — a flaky API call must
 //! not throw away an otherwise-complete benchmark.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use serde::Deserialize;
@@ -46,6 +47,15 @@ pub struct LlmJudge {
     provider: Provider,
     api_key: String,
     model: String,
+    /// Set once we've surfaced a judge failure, so the "falling back to
+    /// heuristic" warning prints to stderr exactly once per run.
+    warned: AtomicBool,
+}
+
+/// A single API call's failure, with whether retrying could help.
+struct CallError {
+    message: String,
+    retryable: bool,
 }
 
 impl LlmJudge {
@@ -76,6 +86,7 @@ impl LlmJudge {
             provider,
             api_key,
             model: model_override.unwrap_or_else(|| default_model.to_string()),
+            warned: AtomicBool::new(false),
         })
     }
 
@@ -102,13 +113,27 @@ impl LlmJudge {
         let prompt = build_prompt(question, ground_truth, system_answer);
         match self.grade_with_retry(&prompt).await {
             Ok(reply) => parse_verdict(question_id, &reply).unwrap_or_else(|| {
-                warn!(question_id, reply = %reply, "llm judge reply unparseable; heuristic fallback");
+                self.warn_once(&format!("unparseable reply: {}", truncate(&reply, 120)));
                 judge_answer_heuristic(question_id, qtype, ground_truth, system_answer)
             }),
             Err(e) => {
-                warn!(question_id, error = %e, "llm judge failed after retries; heuristic fallback");
+                self.warn_once(&e);
                 judge_answer_heuristic(question_id, qtype, ground_truth, system_answer)
             }
+        }
+    }
+
+    /// Surface the first judge failure on stderr (brain-eval installs no
+    /// tracing subscriber, so a silent fallback would otherwise hide a bad
+    /// key / no credit / wrong model behind heuristic scores).
+    fn warn_once(&self, message: &str) {
+        warn!(error = %message, "llm judge failed; heuristic fallback");
+        if !self.warned.swap(true, Ordering::Relaxed) {
+            eprintln!(
+                "warning: LLM judge call failed ({message}). Falling back to the HEURISTIC \
+                 judge for ungraded questions — reported accuracy is NOT LLM-judged. Check the \
+                 API key / credit balance, or set BRAIN_EVAL_JUDGE_MODEL."
+            );
         }
     }
 
@@ -122,20 +147,28 @@ impl LlmJudge {
             }
             match self.call(prompt).await {
                 Ok(text) => return Ok(text),
-                Err(e) => last_err = e,
+                Err(e) => {
+                    let retryable = e.retryable;
+                    last_err = e.message;
+                    // 4xx (bad key, no credit, bad model) won't change on a
+                    // retry — fail fast.
+                    if !retryable {
+                        break;
+                    }
+                }
             }
         }
         Err(last_err)
     }
 
-    async fn call(&self, prompt: &str) -> Result<String, String> {
+    async fn call(&self, prompt: &str) -> Result<String, CallError> {
         match self.provider {
             Provider::Anthropic => self.call_anthropic(prompt).await,
             Provider::OpenAI => self.call_openai(prompt).await,
         }
     }
 
-    async fn call_anthropic(&self, prompt: &str) -> Result<String, String> {
+    async fn call_anthropic(&self, prompt: &str) -> Result<String, CallError> {
         let body = serde_json::json!({
             "model": self.model,
             "max_tokens": MAX_TOKENS,
@@ -149,11 +182,11 @@ impl LlmJudge {
             .json(&body)
             .send()
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(net_err)?;
         let status = resp.status();
-        let text = resp.text().await.map_err(|e| e.to_string())?;
+        let text = resp.text().await.map_err(net_err)?;
         if !status.is_success() {
-            return Err(format!("anthropic {status}: {}", truncate(&text, 300)));
+            return Err(http_err("anthropic", status, &text));
         }
         #[derive(Deserialize)]
         struct Resp {
@@ -164,11 +197,11 @@ impl LlmJudge {
             #[serde(default)]
             text: String,
         }
-        let parsed: Resp = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+        let parsed: Resp = serde_json::from_str(&text).map_err(parse_err)?;
         Ok(parsed.content.into_iter().map(|b| b.text).collect())
     }
 
-    async fn call_openai(&self, prompt: &str) -> Result<String, String> {
+    async fn call_openai(&self, prompt: &str) -> Result<String, CallError> {
         let body = serde_json::json!({
             "model": self.model,
             "temperature": 0,
@@ -181,11 +214,11 @@ impl LlmJudge {
             .json(&body)
             .send()
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(net_err)?;
         let status = resp.status();
-        let text = resp.text().await.map_err(|e| e.to_string())?;
+        let text = resp.text().await.map_err(net_err)?;
         if !status.is_success() {
-            return Err(format!("openai {status}: {}", truncate(&text, 300)));
+            return Err(http_err("openai", status, &text));
         }
         #[derive(Deserialize)]
         struct Resp {
@@ -200,13 +233,38 @@ impl LlmJudge {
             #[serde(default)]
             content: String,
         }
-        let parsed: Resp = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+        let parsed: Resp = serde_json::from_str(&text).map_err(parse_err)?;
         Ok(parsed
             .choices
             .into_iter()
             .next()
             .map(|c| c.message.content)
             .unwrap_or_default())
+    }
+}
+
+/// Network/transport error — worth a retry.
+fn net_err(e: reqwest::Error) -> CallError {
+    CallError {
+        message: e.to_string(),
+        retryable: true,
+    }
+}
+
+/// HTTP error response. 5xx / 429 are transient; 4xx (bad key, no credit,
+/// unknown model) are not.
+fn http_err(provider: &str, status: reqwest::StatusCode, body: &str) -> CallError {
+    CallError {
+        message: format!("{provider} {status}: {}", truncate(body, 300)),
+        retryable: status.is_server_error() || status.as_u16() == 429,
+    }
+}
+
+/// Malformed success body — a retry won't change it.
+fn parse_err(e: serde_json::Error) -> CallError {
+    CallError {
+        message: e.to_string(),
+        retryable: false,
     }
 }
 
