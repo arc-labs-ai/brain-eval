@@ -2,106 +2,56 @@
 //!
 //! The heuristic judge ([`super::judge`]) is honest for fact-style
 //! questions but too blunt for the multi-hop / paraphrased answers in
-//! LongMemEval and LoCoMo. This judge asks a real LLM to grade the
-//! system's answer against the reference, returning correct / partial /
-//! incorrect with a one-line reason.
+//! LongMemEval and LoCoMo. This judge asks a real LLM (via the shared
+//! [`crate::llm::LlmClient`]) to grade the system's answer against the
+//! reference, returning correct / partial / incorrect with a one-line
+//! reason.
 //!
-//! Provider-agnostic: it auto-detects `ANTHROPIC_API_KEY` (Claude, the
-//! default) or `OPENAI_API_KEY`, with the model overridable via
-//! `BRAIN_EVAL_JUDGE_MODEL`. Compiled only under the `live-llm` feature
-//! (it pulls in `reqwest`); without a key, [`LlmJudge::from_env`] returns
-//! `None` and the runner stays on the heuristic judge.
-//!
-//! Robustness: each grade retries on transient/HTTP errors, and a final
-//! failure (or an unparseable reply) falls back to the heuristic judge for
-//! that one question rather than aborting the run — a flaky API call must
-//! not throw away an otherwise-complete benchmark.
+//! Compiled only under the `live-llm` feature; without a provider key
+//! [`LlmJudge::from_env`] returns `None` and the runner stays on the
+//! heuristic judge. A failed call (or unparseable reply) falls back to the
+//! heuristic for that one question and prints a one-time stderr warning so
+//! a credit-less / wrong key can't masquerade as LLM-judged.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
 
-use serde::Deserialize;
 use tracing::warn;
 
 use crate::core::instance::QuestionType;
 use crate::core::outcome::{JudgeResult, Verdict};
+use crate::llm::{truncate, LlmClient};
 use crate::score::judge::judge_answer_heuristic;
 
-const ANTHROPIC_URL: &str = "https://api.anthropic.com/v1/messages";
-const OPENAI_URL: &str = "https://api.openai.com/v1/chat/completions";
-const DEFAULT_ANTHROPIC_MODEL: &str = "claude-haiku-4-5-20251001";
-const DEFAULT_OPENAI_MODEL: &str = "gpt-4o-mini";
-const MAX_RETRIES: u32 = 3;
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
-const MAX_TOKENS: u32 = 512;
-
-#[derive(Clone, Copy, Debug)]
-enum Provider {
-    Anthropic,
-    OpenAI,
-}
+/// Tokens for the verdict JSON — small; the reply is a one-liner.
+const MAX_TOKENS: u32 = 256;
 
 /// A configured LLM grader.
 pub struct LlmJudge {
-    client: reqwest::Client,
-    provider: Provider,
-    api_key: String,
-    model: String,
+    client: LlmClient,
     /// Set once we've surfaced a judge failure, so the "falling back to
     /// heuristic" warning prints to stderr exactly once per run.
     warned: AtomicBool,
 }
 
-/// A single API call's failure, with whether retrying could help.
-struct CallError {
-    message: String,
-    retryable: bool,
-}
-
 impl LlmJudge {
-    /// Build a judge from the environment, or `None` if no provider key is
-    /// set. Prefers Anthropic; `BRAIN_EVAL_JUDGE_MODEL` overrides the model.
+    /// Build from the environment, or `None` if no provider key is set.
+    /// The model is overridable via `BRAIN_EVAL_JUDGE_MODEL`.
     #[must_use]
     pub fn from_env() -> Option<Self> {
-        let model_override = std::env::var("BRAIN_EVAL_JUDGE_MODEL")
-            .ok()
-            .filter(|s| !s.trim().is_empty());
-
-        let (provider, api_key, default_model) = if let Some(k) = nonempty_env("ANTHROPIC_API_KEY")
-        {
-            (Provider::Anthropic, k, DEFAULT_ANTHROPIC_MODEL)
-        } else if let Some(k) = nonempty_env("OPENAI_API_KEY") {
-            (Provider::OpenAI, k, DEFAULT_OPENAI_MODEL)
-        } else {
-            return None;
-        };
-
-        let client = reqwest::Client::builder()
-            .timeout(REQUEST_TIMEOUT)
-            .build()
-            .ok()?;
-
         Some(Self {
-            client,
-            provider,
-            api_key,
-            model: model_override.unwrap_or_else(|| default_model.to_string()),
+            client: LlmClient::from_env("BRAIN_EVAL_JUDGE_MODEL")?,
             warned: AtomicBool::new(false),
         })
     }
 
-    /// Human-readable judge identity for the report header.
+    /// `llm:<provider>:<model>` identity for the report header.
     #[must_use]
     pub fn describe(&self) -> String {
-        let p = match self.provider {
-            Provider::Anthropic => "anthropic",
-            Provider::OpenAI => "openai",
-        };
-        format!("llm:{p}:{}", self.model)
+        format!("llm:{}", self.client.describe())
     }
 
-    /// Grade one answer. Falls back to the heuristic judge on a final API
-    /// failure or an unparseable reply.
+    /// Grade one answer. Falls back to the heuristic judge on a failed call
+    /// or an unparseable reply.
     pub async fn judge(
         &self,
         question_id: &str,
@@ -111,7 +61,7 @@ impl LlmJudge {
         system_answer: &str,
     ) -> JudgeResult {
         let prompt = build_prompt(question, ground_truth, system_answer);
-        match self.grade_with_retry(&prompt).await {
+        match self.client.complete(&prompt, MAX_TOKENS).await {
             Ok(reply) => parse_verdict(question_id, &reply).unwrap_or_else(|| {
                 self.warn_once(&format!("unparseable reply: {}", truncate(&reply, 120)));
                 judge_answer_heuristic(question_id, qtype, ground_truth, system_answer)
@@ -136,140 +86,6 @@ impl LlmJudge {
             );
         }
     }
-
-    async fn grade_with_retry(&self, prompt: &str) -> Result<String, String> {
-        let mut last_err = String::from("no attempt made");
-        for attempt in 0..MAX_RETRIES {
-            if attempt > 0 {
-                // 0.5s, 1s, 2s backoff.
-                let backoff = Duration::from_millis(500u64 << (attempt - 1));
-                tokio::time::sleep(backoff).await;
-            }
-            match self.call(prompt).await {
-                Ok(text) => return Ok(text),
-                Err(e) => {
-                    let retryable = e.retryable;
-                    last_err = e.message;
-                    // 4xx (bad key, no credit, bad model) won't change on a
-                    // retry — fail fast.
-                    if !retryable {
-                        break;
-                    }
-                }
-            }
-        }
-        Err(last_err)
-    }
-
-    async fn call(&self, prompt: &str) -> Result<String, CallError> {
-        match self.provider {
-            Provider::Anthropic => self.call_anthropic(prompt).await,
-            Provider::OpenAI => self.call_openai(prompt).await,
-        }
-    }
-
-    async fn call_anthropic(&self, prompt: &str) -> Result<String, CallError> {
-        let body = serde_json::json!({
-            "model": self.model,
-            "max_tokens": MAX_TOKENS,
-            "messages": [{ "role": "user", "content": prompt }],
-        });
-        let resp = self
-            .client
-            .post(ANTHROPIC_URL)
-            .header("x-api-key", &self.api_key)
-            .header("anthropic-version", "2023-06-01")
-            .json(&body)
-            .send()
-            .await
-            .map_err(net_err)?;
-        let status = resp.status();
-        let text = resp.text().await.map_err(net_err)?;
-        if !status.is_success() {
-            return Err(http_err("anthropic", status, &text));
-        }
-        #[derive(Deserialize)]
-        struct Resp {
-            content: Vec<Block>,
-        }
-        #[derive(Deserialize)]
-        struct Block {
-            #[serde(default)]
-            text: String,
-        }
-        let parsed: Resp = serde_json::from_str(&text).map_err(parse_err)?;
-        Ok(parsed.content.into_iter().map(|b| b.text).collect())
-    }
-
-    async fn call_openai(&self, prompt: &str) -> Result<String, CallError> {
-        let body = serde_json::json!({
-            "model": self.model,
-            "temperature": 0,
-            "messages": [{ "role": "user", "content": prompt }],
-        });
-        let resp = self
-            .client
-            .post(OPENAI_URL)
-            .bearer_auth(&self.api_key)
-            .json(&body)
-            .send()
-            .await
-            .map_err(net_err)?;
-        let status = resp.status();
-        let text = resp.text().await.map_err(net_err)?;
-        if !status.is_success() {
-            return Err(http_err("openai", status, &text));
-        }
-        #[derive(Deserialize)]
-        struct Resp {
-            choices: Vec<Choice>,
-        }
-        #[derive(Deserialize)]
-        struct Choice {
-            message: Message,
-        }
-        #[derive(Deserialize)]
-        struct Message {
-            #[serde(default)]
-            content: String,
-        }
-        let parsed: Resp = serde_json::from_str(&text).map_err(parse_err)?;
-        Ok(parsed
-            .choices
-            .into_iter()
-            .next()
-            .map(|c| c.message.content)
-            .unwrap_or_default())
-    }
-}
-
-/// Network/transport error — worth a retry.
-fn net_err(e: reqwest::Error) -> CallError {
-    CallError {
-        message: e.to_string(),
-        retryable: true,
-    }
-}
-
-/// HTTP error response. 5xx / 429 are transient; 4xx (bad key, no credit,
-/// unknown model) are not.
-fn http_err(provider: &str, status: reqwest::StatusCode, body: &str) -> CallError {
-    CallError {
-        message: format!("{provider} {status}: {}", truncate(body, 300)),
-        retryable: status.is_server_error() || status.as_u16() == 429,
-    }
-}
-
-/// Malformed success body — a retry won't change it.
-fn parse_err(e: serde_json::Error) -> CallError {
-    CallError {
-        message: e.to_string(),
-        retryable: false,
-    }
-}
-
-fn nonempty_env(key: &str) -> Option<String> {
-    std::env::var(key).ok().filter(|v| !v.trim().is_empty())
 }
 
 fn build_prompt(question: &str, ground_truth: &str, system_answer: &str) -> String {
@@ -289,7 +105,7 @@ fn build_prompt(question: &str, ground_truth: &str, system_answer: &str) -> Stri
     )
 }
 
-#[derive(Deserialize)]
+#[derive(serde::Deserialize)]
 struct VerdictReply {
     verdict: String,
     #[serde(default)]
@@ -318,14 +134,6 @@ fn parse_verdict(question_id: &str, reply: &str) -> Option<JudgeResult> {
         score: verdict.score(),
         reasoning: parsed.reasoning,
     })
-}
-
-fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        s.to_string()
-    } else {
-        format!("{}…", &s[..max])
-    }
 }
 
 #[cfg(test)]

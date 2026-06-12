@@ -47,6 +47,9 @@
 pub mod acceptance;
 pub mod core;
 pub mod datasets;
+/// Shared LLM HTTP client for the `live-llm` synthesis + judge paths.
+#[cfg(feature = "live-llm")]
+pub mod llm;
 pub mod report;
 pub mod run;
 pub mod scale;

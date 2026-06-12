@@ -1,17 +1,16 @@
 //! Answer synthesis — turning retrieved memories into a candidate
 //! answer string.
 //!
-//! Brain's `live-llm` answer path (REASON over the top-K hits) is a
-//! follow-up; v1 ships the heuristic synthesizer only. It concatenates
-//! the top-K memory texts with question-type-aware formatting:
+//! Two synthesizers:
 //!
-//! - `Abstention`: returns `"I don't know."` when no memories were
-//!   retrieved, otherwise summarises in case the hit was wrong.
-//! - everything else: numbered list of memory texts, joined.
-//!
-//! Downstream the judge reads this; for the heuristic judge the
-//! substring rule catches "ground truth contained in any returned
-//! memory's text," which is enough for fact-style benchmarks.
+//! - **Heuristic** ([`synthesize_answer`], always available): concatenates
+//!   the top-K memory texts as a numbered list. Fine for the substring
+//!   judge on fact-style benchmarks, but it buries exact facts (dates,
+//!   counts) in raw dialogue, which caps LoCoMo / LongMemEval accuracy.
+//! - **LLM** ([`LlmSynthesizer`], behind `live-llm` + a key): asks a model
+//!   to compose a concise answer from the retrieved snippets, or to decline
+//!   when they don't contain it. This is the answer the (LLM) judge then
+//!   grades. Falls back to the heuristic on a failed call.
 
 use brain_db_sdk::wire::types::MemoryResult;
 
@@ -45,6 +44,91 @@ pub fn synthesize_answer(
         out.push_str(&format!("{}. {}", i + 1, m.text));
     }
     out
+}
+
+/// Format the top-K memory snippets as a numbered block for a prompt.
+#[cfg(feature = "live-llm")]
+fn memory_block(memories: &[MemoryResult], top_k: usize) -> String {
+    let cap = memories.len().min(top_k.max(1));
+    let mut out = String::new();
+    for (i, m) in memories.iter().take(cap).enumerate() {
+        out.push_str(&format!("{}. {}\n", i + 1, m.text));
+    }
+    out
+}
+
+/// LLM answer synthesizer: composes a concise answer from the retrieved
+/// memories. Compiled only under `live-llm`; falls back to
+/// [`synthesize_answer`] on a failed call.
+#[cfg(feature = "live-llm")]
+pub struct LlmSynthesizer {
+    client: crate::llm::LlmClient,
+    warned: std::sync::atomic::AtomicBool,
+}
+
+#[cfg(feature = "live-llm")]
+impl LlmSynthesizer {
+    /// Build from the environment, or `None` if no provider key is set.
+    /// Model overridable via `BRAIN_EVAL_SYNTH_MODEL`.
+    #[must_use]
+    pub fn from_env() -> Option<Self> {
+        Some(Self {
+            client: crate::llm::LlmClient::from_env("BRAIN_EVAL_SYNTH_MODEL")?,
+            warned: std::sync::atomic::AtomicBool::new(false),
+        })
+    }
+
+    /// `llm:<provider>:<model>` identity for logging.
+    #[must_use]
+    pub fn describe(&self) -> String {
+        format!("llm:{}", self.client.describe())
+    }
+
+    /// Compose an answer from the top-K memories. Empty input → "I don't
+    /// know."; a failed/empty LLM reply → the heuristic concatenation.
+    pub async fn synthesize(
+        &self,
+        question: &str,
+        memories: &[MemoryResult],
+        qtype: QuestionType,
+        top_k: usize,
+    ) -> String {
+        if memories.is_empty() {
+            return "I don't know.".to_owned();
+        }
+        let prompt = format!(
+            "Answer the question using ONLY the retrieved memory snippets below. \
+             Be concise and direct — give just the answer, not an explanation. \
+             If the snippets do not contain the answer, reply exactly \"I don't know.\"\n\n\
+             Question: {question}\n\n\
+             Memories:\n{}\n\
+             Answer:",
+            memory_block(memories, top_k)
+        );
+        match self.client.complete(&prompt, 512).await {
+            Ok(answer) if !answer.trim().is_empty() => answer.trim().to_owned(),
+            Ok(_) => {
+                self.warn_once("empty reply");
+                synthesize_answer(question, memories, qtype, top_k)
+            }
+            Err(e) => {
+                self.warn_once(&e);
+                synthesize_answer(question, memories, qtype, top_k)
+            }
+        }
+    }
+
+    fn warn_once(&self, message: &str) {
+        use std::sync::atomic::Ordering;
+        tracing::warn!(error = %message, "llm synthesizer failed; heuristic fallback");
+        if !self.warned.swap(true, Ordering::Relaxed) {
+            eprintln!(
+                "warning: LLM synthesizer call failed ({message}). Falling back to the \
+                 raw top-K concatenation for unsynthesized answers. Check the API key / \
+                 credit balance, or set BRAIN_EVAL_SYNTH_MODEL."
+            );
+        }
+    }
 }
 
 #[cfg(test)]

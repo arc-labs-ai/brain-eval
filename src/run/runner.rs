@@ -38,6 +38,10 @@ pub struct EvalRunner {
     /// `None` keeps scoring on the heuristic judge.
     #[cfg(feature = "live-llm")]
     llm_judge: Option<crate::score::llm_judge::LlmJudge>,
+    /// LLM answer synthesizer, same gating. `None` keeps the heuristic
+    /// top-K concatenation.
+    #[cfg(feature = "live-llm")]
+    llm_synth: Option<crate::run::synthesize::LlmSynthesizer>,
 }
 
 impl EvalRunner {
@@ -49,7 +53,27 @@ impl EvalRunner {
             competitor_fn,
             #[cfg(feature = "live-llm")]
             llm_judge: crate::score::llm_judge::LlmJudge::from_env(),
+            #[cfg(feature = "live-llm")]
+            llm_synth: crate::run::synthesize::LlmSynthesizer::from_env(),
         }
+    }
+
+    /// Compose an answer: the LLM synthesizer when configured, else the
+    /// heuristic top-K concatenation.
+    #[cfg_attr(not(feature = "live-llm"), allow(clippy::unused_self))]
+    async fn synth_answer(
+        &self,
+        instance: &EvalInstance,
+        hits: &[brain_db_sdk::wire::types::MemoryResult],
+        top_k: usize,
+    ) -> String {
+        #[cfg(feature = "live-llm")]
+        if let Some(synth) = &self.llm_synth {
+            return synth
+                .synthesize(&instance.question, hits, instance.question_type, top_k)
+                .await;
+        }
+        synthesize_answer(&instance.question, hits, instance.question_type, top_k)
     }
 
     /// Score one answer: the LLM judge when configured, else the heuristic.
@@ -222,12 +246,7 @@ impl EvalRunner {
 
         #[allow(clippy::cast_possible_truncation)]
         let cap = self.config.top_k_retrieve as usize;
-        let system_answer = synthesize_answer(
-            &instance.question,
-            &hits,
-            instance.question_type,
-            cap.max(1),
-        );
+        let system_answer = self.synth_answer(instance, &hits, cap.max(1)).await;
 
         let judged = self.judge_answer(instance, &system_answer).await;
 
