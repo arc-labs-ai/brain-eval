@@ -55,18 +55,27 @@ fetch \
   || manual "LoCoMo" "https://github.com/snap-research/locomo" "$DIR/locomo/locomo10.json"
 
 echo "== LongMemEval-S =="
-# Released via the project's HuggingFace dataset; the resolve URL changes with
-# revisions, so try it and fall back to manual.
+# Official release is the `longmemeval-cleaned` HF dataset; its
+# `longmemeval_s_cleaned.json` already matches our loader's schema
+# (question_id / question_type / question / answer / haystack_sessions).
+# Large file (~hundreds of MB) — the download takes a moment.
 fetch \
-  "https://huggingface.co/datasets/xiaowu0162/longmemeval/resolve/main/longmemeval_s.json" \
+  "https://huggingface.co/datasets/xiaowu0162/longmemeval-cleaned/resolve/main/longmemeval_s_cleaned.json" \
   "$DIR/longmemeval/longmemeval_s.json" \
-  || manual "LongMemEval-S" "https://github.com/xiaowu0162/LongMemEval (HuggingFace: xiaowu0162/longmemeval)" \
+  || manual "LongMemEval-S" \
+            "https://huggingface.co/datasets/xiaowu0162/longmemeval-cleaned (file: longmemeval_s_cleaned.json)" \
             "$DIR/longmemeval/longmemeval_s.json"
 
 echo "== DMR =="
-# DMR (MemGPT/Letta) ships inside the MemGPT eval bundle; no single stable raw
-# URL, so it's manual.
-manual "DMR" "https://github.com/cpacker/MemGPT (DMR eval data → dmr.jsonl, one JSON object per line)" \
+# DMR is the MemGPT "augmented MSC" set (memgpt.ai / the Letta repo). It is
+# NOT published in our normalized shape, so it needs a one-time conversion to
+# dmr.jsonl: one JSON object per line with fields
+#   {id, question, answer, conversation_id,
+#    sessions:[{session_id, turns:[{role, content}]}]}
+# Obtain the raw MemGPT MSC/DMR data, then map each conversation+question
+# onto that shape. (LoCoMo + LongMemEval-S are the stronger benchmarks to
+# start with; DMR is single-hop fact retrieval.)
+manual "DMR" "https://github.com/letta-ai/letta (MemGPT MSC/DMR data) — convert to the normalized dmr.jsonl shape above" \
        "$DIR/dmr/dmr.jsonl"
 
 echo

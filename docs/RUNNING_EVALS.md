@@ -22,11 +22,18 @@ ground truth → score, and compare to the competitor baselines in
 ## One-time setup
 
 ```bash
-# 1. Datasets (LoCoMo auto-downloads; LongMemEval-S / DMR may need a manual
-#    step — the script prints the source + exact target path).
+# 1. Datasets. LoCoMo and LongMemEval-S (the `longmemeval-cleaned` release)
+#    auto-download. DMR needs a one-time conversion (see below); the script
+#    prints the source + exact target path for anything it can't fetch.
 export BRAIN_EVAL_DATASETS_DIR=~/brain-datasets
 scripts/fetch-datasets.sh
 ```
+
+DMR (`dmr`) is the MemGPT "augmented MSC" set and isn't published in our
+normalized shape, so it needs a one-time conversion to
+`$BRAIN_EVAL_DATASETS_DIR/dmr/dmr.jsonl` — one JSON object per line:
+`{id, question, answer, conversation_id, sessions:[{session_id, turns:[{role, content}]}]}`.
+LoCoMo and LongMemEval-S are the stronger benchmarks to start with.
 
 ## Run
 
