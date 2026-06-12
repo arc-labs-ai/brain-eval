@@ -4,6 +4,15 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Nightly full live run + on-demand.
+  schedule:
+    - cron: "0 7 * * *"
+  workflow_dispatch:
+
+# A newer push to a branch supersedes the in-flight run for it.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
@@ -11,7 +20,7 @@ env:
 jobs:
   # Build + lint + the no-server tests (unit, parser/golden, library logic).
   # The ignored e2e / scale / system / soak tests need a running
-  # brain-server and run in the `live` job / on reference hardware.
+  # brain-server and run in the `live` job.
   check:
     runs-on: ubuntu-latest
     steps:
@@ -49,13 +58,18 @@ jobs:
         working-directory: brain-eval
         run: cargo test
 
-  # Live tier: boot the brain server image and run the acceptance smoke +
-  # system scenarios against it. Requires the `brain:<tag>` image and the
-  # BGE model — provided by a self-hosted runner or an image-build step.
-  # Gated to manual / scheduled runs; the full 1M scale-run + 48h soak run
-  # on reference hardware via `brain-eval acceptance --scale 1m` / `soak`.
+  # Live tier: build the brain-server image, provision the models, and run
+  # the full-stack acceptance / scenario / soak / regression gates against
+  # it. Runs on pushes to main, nightly, and on demand — NOT on every PR
+  # (it builds a release image + boots containers, which is too heavy for
+  # PR latency). The 1M scale-run + 48h soak are the reference-hardware
+  # extension (AcceptanceConfig::full_scale / a long soak config); this job
+  # is the smoke-scale live gate that must stay green continuously.
   live:
-    if: ${{ github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' }}
+    if: >-
+      ${{ github.event_name == 'schedule'
+        || github.event_name == 'workflow_dispatch'
+        || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout brain-eval
@@ -67,18 +81,66 @@ jobs:
         with:
           repository: brain-db-io/brain-sdk
           path: brain-sdk
+      # The server image is built from the brain repo's Dockerfile. If brain
+      # is private, set a repo-scoped PAT in the `BRAIN_REPO_TOKEN` secret;
+      # for a public repo the default checkout suffices.
+      - name: Checkout brain (server, for the image build + model bootstrap)
+        uses: actions/checkout@v4
+        with:
+          repository: brain-db-io/brain
+          path: brain
+          token: ${{ secrets.BRAIN_REPO_TOKEN || github.token }}
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo + target
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: brain-eval
 
-      # A real run needs the brain-server image + the BGE model on disk.
-      # On a self-hosted runner those are present; here we document the
-      # contract and skip if the image is absent.
-      - name: Acceptance smoke (if image present)
-        working-directory: brain-eval
+      # The three models brain-server refuses to start without
+      # (embed + reranker + gliner, ~1.8 GiB). Cached across runs; the
+      # bootstrap script skips any model already on disk.
+      - name: Cache models
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/share/brain/models
+          key: brain-models-${{ hashFiles('brain/.devcontainer/bootstrap-model.sh') }}
+      - name: Provision models
         run: |
-          if docker image inspect brain:latest >/dev/null 2>&1; then
-            BRAIN_EVAL_RESTART_RECOVERY=1 \
-              cargo run --release --bin brain-eval -- acceptance
-          else
-            echo "brain:latest image not present on this runner; skipping live tier"
-          fi
+          chmod +x brain/.devcontainer/bootstrap-model.sh
+          brain/.devcontainer/bootstrap-model.sh
+      - name: Load models into the brain-models volume
+        run: |
+          docker volume create brain-models
+          docker run --rm \
+            -v brain-models:/models \
+            -v "$HOME/.local/share/brain/models:/src:ro" \
+            alpine sh -c 'cp -a /src/. /models/ && ls -1 /models'
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Build brain:latest
+        uses: docker/build-push-action@v6
+        with:
+          context: brain
+          load: true
+          tags: brain:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Every `#[ignore]` live test boots its own full-stack container
+      # (distinct ports / names / volumes) and cleans up after itself.
+      # cargo runs the test binaries sequentially, so at most one container
+      # is live at a time. `--ignored` selects exactly the live tests.
+      - name: Live acceptance gates
+        working-directory: brain-eval
+        env:
+          BRAIN_EVAL_IMAGE_TAG: latest
+        run: cargo test --release -- --ignored --nocapture --test-threads=1
+
+      - name: Clean up docker
+        if: always()
+        run: |
+          docker ps -aq --filter "name=brain-eval-" | xargs -r docker rm -f
+          docker volume ls -q | grep -E "brain-eval-|brain-acc-" | xargs -r docker volume rm -f || true

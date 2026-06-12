@@ -1,0 +1,13 @@
+# brain-eval recall-quality baseline (known-answer recall).
+#
+# Conservative FLOOR, not a best-observed value. With the cross-encoder
+# reranker on, recall@1 over the near-duplicate probe texts swings ~0.84-0.96
+# run-to-run at the smoke N (recall@K stays 1.0). The regression gate
+# (tests/regression_live.rs) fails when a live run drops more than its
+# tolerance (0.10) below these — i.e. on a real collapse, not jitter.
+#
+# Re-bless to a tighter measured baseline from a stable larger-N run on
+# reference/x86_64 hardware:
+#   BRAIN_EVAL_BLESS_BASELINE=1 cargo test --test regression_live -- --ignored
+recall_at_1=0.85
+recall_at_k=0.95
