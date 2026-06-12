@@ -20,7 +20,7 @@ use tracing::warn;
 
 use crate::core::benchmark::{Benchmark, EvalError};
 use crate::core::instance::EvalInstance;
-use crate::core::outcome::{QuestionResult, Verdict};
+use crate::core::outcome::{JudgeResult, QuestionResult, Verdict};
 use crate::report::baselines::CompetitorBaselines;
 use crate::report::format::{json::JsonReporter, text::TextReporter, Reporter};
 use crate::report::shape::{BenchmarkMeta, BenchmarkReport};
@@ -34,6 +34,10 @@ use crate::score::metrics::compute_full_metrics;
 pub struct EvalRunner {
     config: RunConfig,
     competitor_fn: CompetitorBaselines,
+    /// LLM judge, if `live-llm` is enabled and a provider key is set.
+    /// `None` keeps scoring on the heuristic judge.
+    #[cfg(feature = "live-llm")]
+    llm_judge: Option<crate::score::llm_judge::LlmJudge>,
 }
 
 impl EvalRunner {
@@ -43,7 +47,32 @@ impl EvalRunner {
         Self {
             config,
             competitor_fn,
+            #[cfg(feature = "live-llm")]
+            llm_judge: crate::score::llm_judge::LlmJudge::from_env(),
         }
+    }
+
+    /// Score one answer: the LLM judge when configured, else the heuristic.
+    #[cfg_attr(not(feature = "live-llm"), allow(clippy::unused_self))]
+    async fn judge_answer(&self, instance: &EvalInstance, system_answer: &str) -> JudgeResult {
+        #[cfg(feature = "live-llm")]
+        if let Some(judge) = &self.llm_judge {
+            return judge
+                .judge(
+                    &instance.question_id,
+                    instance.question_type,
+                    &instance.question,
+                    &instance.answer,
+                    system_answer,
+                )
+                .await;
+        }
+        judge_answer_heuristic(
+            &instance.question_id,
+            instance.question_type,
+            &instance.answer,
+            system_answer,
+        )
     }
 
     /// Run `benchmark` end-to-end. The report is written to
@@ -72,16 +101,20 @@ impl EvalRunner {
             None => instances,
         };
 
-        let judge_type = if cfg!(feature = "live-llm") {
-            "llm"
-        } else {
-            "heuristic"
+        // Reflect the judge that will actually run, not just the feature:
+        // `live-llm` with no API key still scores on the heuristic.
+        #[cfg(feature = "live-llm")]
+        let judge_type = match &self.llm_judge {
+            Some(j) => j.describe(),
+            None => "heuristic".to_string(),
         };
+        #[cfg(not(feature = "live-llm"))]
+        let judge_type = "heuristic".to_string();
         let meta = BenchmarkMeta::new(
             benchmark.id(),
             benchmark.display_name(),
             benchmark.url(),
-            judge_type,
+            &judge_type,
             instances.len(),
         );
 
@@ -196,12 +229,7 @@ impl EvalRunner {
             cap.max(1),
         );
 
-        let judged = judge_answer_heuristic(
-            &instance.question_id,
-            instance.question_type,
-            &instance.answer,
-            &system_answer,
-        );
+        let judged = self.judge_answer(instance, &system_answer).await;
 
         QuestionResult {
             question_id: instance.question_id.clone(),

@@ -28,6 +28,8 @@ Thumbs.db
 /eval-reports/
 /target/eval-reports/
 /.brain-eval-datasets/
+# Downloaded benchmark datasets (fetched by scripts/fetch-datasets.sh).
+/datasets/
 *.log
 
 # Local scratch

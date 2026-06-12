@@ -1,12 +1,15 @@
 //! Scoring layer — judges, metric shapes, and aggregation.
 //!
-//! - [`judge`]     — heuristic answer judge; LLM judge slots in later.
+//! - [`judge`]     — heuristic answer judge (always available).
+//! - [`llm_judge`] — LLM-as-judge (behind the `live-llm` feature).
 //! - [`metrics`]   — aggregate `EvalMetrics` + `compute_full_metrics`.
 //! - [`retrieval`] — `RetrievalStats`, Recall@K, NDCG@K.
 //! - [`latency`]   — `LatencyStats` + percentile computation.
 
 pub mod judge;
 pub mod latency;
+#[cfg(feature = "live-llm")]
+pub mod llm_judge;
 pub mod metrics;
 pub mod retrieval;
 
