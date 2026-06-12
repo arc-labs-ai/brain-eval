@@ -152,9 +152,28 @@ struct LocomoTurn {
 #[derive(Debug, Deserialize)]
 struct LocomoQa {
     question: String,
+    // LoCoMo answers are usually strings but are sometimes bare numbers
+    // (a year, a count) or booleans; accept any scalar and stringify it.
+    #[serde(deserialize_with = "scalar_to_string")]
     answer: String,
     #[serde(default)]
     category: Option<u8>,
+}
+
+/// Deserialize a JSON scalar (string / number / bool) into a `String`.
+/// LoCoMo's `answer` field isn't consistently typed across questions.
+fn scalar_to_string<'de, D>(de: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize;
+    Ok(match serde_json::Value::deserialize(de)? {
+        serde_json::Value::String(s) => s,
+        serde_json::Value::Number(n) => n.to_string(),
+        serde_json::Value::Bool(b) => b.to_string(),
+        serde_json::Value::Null => String::new(),
+        other => other.to_string(),
+    })
 }
 
 fn default_sample_id() -> String {
