@@ -21,7 +21,12 @@ pub struct RunConfig {
     pub endpoint: SocketAddr,
     /// Cap question count (smoke runs). `None` = run all.
     pub max_questions: Option<usize>,
-    /// `top_k` passed to every RECALL.
+    /// `top_k` passed to every RECALL. Generous on purpose: long-corpus
+    /// benchmarks (LoCoMo ≈ 588 turns/conversation) need a wide candidate
+    /// set for the cross-encoder to rerank — pulling only the top few
+    /// strands the answer-bearing memory below the cutoff. Measured on
+    /// LoCoMo: top-10 → 0.42 accuracy, top-50 → 0.75. Override with
+    /// `BRAIN_EVAL_TOP_K`.
     pub top_k_retrieve: u32,
     /// Where to write report files.
     pub output_dir: PathBuf,
@@ -36,7 +41,7 @@ impl RunConfig {
         Self {
             endpoint,
             max_questions: None,
-            top_k_retrieve: 10,
+            top_k_retrieve: 50,
             output_dir: PathBuf::from("target/eval-reports"),
             reporters: vec![ReporterKind::Json, ReporterKind::Text],
         }
