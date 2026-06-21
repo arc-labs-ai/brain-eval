@@ -41,6 +41,8 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+      - name: Install nextest
+        uses: taiki-e/install-action@nextest
 
       - name: Format
         working-directory: brain-eval
@@ -56,7 +58,9 @@ jobs:
 
       - name: Test (no-server)
         working-directory: brain-eval
-        run: cargo test
+        run: |
+          cargo nextest run
+          cargo test --doc
 
   # Live tier: build the brain-server image, provision the models, and run
   # the full-stack acceptance / scenario / soak / regression gates against
@@ -93,6 +97,8 @@ jobs:
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
+      - name: Install nextest
+        uses: taiki-e/install-action@nextest
       - name: Cache cargo + target
         uses: Swatinem/rust-cache@v2
         with:
@@ -137,7 +143,9 @@ jobs:
         working-directory: brain-eval
         env:
           BRAIN_EVAL_IMAGE_TAG: latest
-        run: cargo test --release -- --ignored --nocapture --test-threads=1
+        # The `live` profile pins test-threads=1 (each test boots its own
+        # container). --run-ignored ignored-only selects exactly the live tests.
+        run: cargo nextest run --release --profile live --run-ignored ignored-only --no-capture
 
       - name: Clean up docker
         if: always()

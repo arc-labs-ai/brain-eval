@@ -1,0 +1,21 @@
+# cargo-nextest configuration — https://nexte.st
+#
+# nextest runs the unit + integration tests; doctests are NOT run by nextest
+# (upstream limitation) and stay on `cargo test --doc`.
+
+[profile.default]
+# Report every failure from one run, not just the first.
+fail-fast = false
+# Flag slow tests without killing them.
+slow-timeout = "120s"
+
+# Live acceptance / scenario / soak gates (the `#[ignore]`d `*_live` tests)
+# each boot their OWN full-stack brain-server docker container on distinct
+# ports/names/volumes and clean up after themselves — only one container may
+# be live at a time, so they MUST run single-threaded. Booting + soak takes a
+# while, so the slow-warning is relaxed (never kills).
+#   cargo nextest run --release --profile live --run-ignored ignored-only --no-capture
+[profile.live]
+fail-fast = false
+test-threads = 1
+slow-timeout = "300s"
