@@ -8,6 +8,7 @@
 //! - [`synthesize`] — answer shape → candidate answer.
 //! - [`runner`]    — `EvalRunner`: orchestrates ingest → recall → judge.
 
+pub mod agent_manifest;
 pub mod config;
 pub mod harness;
 pub mod metrics;

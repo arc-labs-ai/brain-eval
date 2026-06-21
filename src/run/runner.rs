@@ -24,6 +24,7 @@ use crate::core::outcome::{JudgeResult, QuestionResult, Verdict};
 use crate::report::baselines::CompetitorBaselines;
 use crate::report::format::{json::JsonReporter, text::TextReporter, Reporter};
 use crate::report::shape::{BenchmarkMeta, BenchmarkReport};
+use crate::run::agent_manifest::AgentManifest;
 use crate::run::config::{ReporterKind, RunConfig};
 use crate::run::harness::{BrainEvalHarness, RecallOutcome};
 use crate::run::synthesize::synthesize_answer;
@@ -205,55 +206,131 @@ impl EvalRunner {
             tracker.path.display()
         );
 
+        // Read-only mode: reconnect to the agents a prior `--persist-agents`
+        // run recorded and SKIP ingest entirely, so the read path can be
+        // re-measured against the already-populated store with no write cost.
+        let read_only = match &self.config.read_only_agents {
+            Some(path) => {
+                let m = AgentManifest::load(path).map_err(|e| EvalError::ParseError {
+                    path: path.display().to_string(),
+                    reason: format!("read-only agent manifest: {e}"),
+                })?;
+                println!(
+                    "eval: read-only mode — reusing {} agents from {} (no ingest)",
+                    m.len(),
+                    path.display()
+                );
+                Some(m)
+            }
+            None => None,
+        };
+        // Persist mode: record each conversation's agent id so a later
+        // read-only run can reuse it. Only meaningful on an ingesting run.
+        let mut persist = self.config.persist_agents.as_ref().map(|_| {
+            AgentManifest::new(benchmark.id(), self.config.endpoint.to_string())
+        });
+
         for (conv_key, idxs) in &groups {
-            let harness = match BrainEvalHarness::connect(self.config.endpoint).await {
-                Ok(h) => h,
-                Err(e) => {
+            // Establish the harness and decide whether to ingest. Read-only
+            // reconnects to the recorded agent and skips ingest entirely;
+            // otherwise mint a fresh agent, ingest once, and (if persisting)
+            // record the agent for future read-only reuse.
+            #[allow(clippy::type_complexity)]
+            let (harness, write_latency_ms, write_attempted, write_stored, write_deduplicated, ingest_err): (
+                BrainEvalHarness,
+                u64,
+                u64,
+                u64,
+                u64,
+                bool,
+            ) = if let Some(manifest) = &read_only {
+                let Some(agent) = manifest.agent_for(conv_key) else {
                     warn!(
                         conversation = %conv_key,
-                        error = %e,
-                        "harness connect failed; recording every question in this group as failed",
+                        "read-only: no agent recorded for this conversation; recording its questions as failed",
                     );
                     for &idx in idxs {
-                        let inst = &instances[idx];
                         let r = failed_question_result(
-                            inst,
-                            format!("connect failed: {e}"),
+                            &instances[idx],
+                            "read-only: no persisted agent for conversation".to_owned(),
                             /* ingest_failed = */ true,
                         );
                         tracker.record(&r);
                         question_results.push(r);
                     }
                     continue;
+                };
+                match BrainEvalHarness::connect_with_agent(self.config.endpoint, agent).await {
+                    Ok(h) => (h, 0, 0, 0, 0, false),
+                    Err(e) => {
+                        warn!(conversation = %conv_key, error = %e, "read-only: reconnect failed; recording group as failed");
+                        for &idx in idxs {
+                            let r = failed_question_result(
+                                &instances[idx],
+                                format!("read-only reconnect failed: {e}"),
+                                true,
+                            );
+                            tracker.record(&r);
+                            question_results.push(r);
+                        }
+                        continue;
+                    }
                 }
+            } else {
+                let harness = match BrainEvalHarness::connect(self.config.endpoint).await {
+                    Ok(h) => h,
+                    Err(e) => {
+                        warn!(
+                            conversation = %conv_key,
+                            error = %e,
+                            "harness connect failed; recording every question in this group as failed",
+                        );
+                        for &idx in idxs {
+                            let inst = &instances[idx];
+                            let r = failed_question_result(
+                                inst,
+                                format!("connect failed: {e}"),
+                                /* ingest_failed = */ true,
+                            );
+                            tracker.record(&r);
+                            question_results.push(r);
+                        }
+                        continue;
+                    }
+                };
+
+                // Record the agent so a later read-only run can reuse it.
+                if let Some(p) = persist.as_mut() {
+                    p.record(conv_key, harness.agent_id());
+                }
+
+                // ---- ingest once ----
+                let first = &instances[idxs[0]];
+                let outcome = ingest_sessions(&harness, first).await;
+
+                // ---- wait for async write-time extraction to drain ----
+                // Brain's extractors (entity / statement / relation) run
+                // asynchronously after ENCODE acks (extraction → statement
+                // embedding). Querying immediately would hit a half-built
+                // graph / empty embeddings, so we block until that whole
+                // async pipeline plateaus before reading — this is the
+                // correct default for measurement. Set BRAIN_EVAL_NO_DRAIN
+                // to a truthy value (1/true/yes/on) to opt out and read
+                // against the live, still-settling graph.
+                if !env_truthy("BRAIN_EVAL_NO_DRAIN") {
+                    let admin_port = std::env::var("BRAIN_EVAL_DRAIN_ADMIN_PORT")
+                        .ok()
+                        .and_then(|p| p.parse::<u16>().ok())
+                        .unwrap_or(9091);
+                    let url = format!(
+                        "http://{}:{}/metrics",
+                        self.config.endpoint.ip(),
+                        admin_port
+                    );
+                    wait_for_write_flush(&url, conv_key).await;
+                }
+                (harness, outcome.0, outcome.1, outcome.2, outcome.3, outcome.4)
             };
-
-            // ---- ingest once ----
-            let first = &instances[idxs[0]];
-            let (write_latency_ms, write_attempted, write_stored, write_deduplicated, ingest_err) =
-                ingest_sessions(&harness, first).await;
-
-            // ---- wait for async write-time extraction to drain ----
-            // Brain's extractors (entity / statement / relation) run
-            // asynchronously after ENCODE acks (extraction → statement
-            // embedding). Querying immediately would hit a half-built
-            // graph / empty embeddings, so we block until that whole
-            // async pipeline plateaus before reading — this is the
-            // correct default for measurement. Set BRAIN_EVAL_NO_DRAIN
-            // to a truthy value (1/true/yes/on) to opt out and read
-            // against the live, still-settling graph.
-            if !env_truthy("BRAIN_EVAL_NO_DRAIN") {
-                let admin_port = std::env::var("BRAIN_EVAL_DRAIN_ADMIN_PORT")
-                    .ok()
-                    .and_then(|p| p.parse::<u16>().ok())
-                    .unwrap_or(9091);
-                let url = format!(
-                    "http://{}:{}/metrics",
-                    self.config.endpoint.ip(),
-                    admin_port
-                );
-                wait_for_write_flush(&url, conv_key).await;
-            }
 
             // ---- per-question retrieval + judging ----
             for &idx in idxs {
@@ -276,6 +353,21 @@ impl EvalRunner {
             // ---- close harness (best-effort) ----
             if let Err(e) = harness.close().await {
                 warn!(error = %e, "harness close failed; continuing");
+            }
+        }
+
+        // Persist the conversation→agent manifest so a later
+        // `BRAIN_EVAL_READ_ONLY_AGENTS` run can re-query this populated
+        // store without re-ingesting.
+        if let (Some(p), Some(path)) = (persist.as_ref(), self.config.persist_agents.as_ref()) {
+            match p.save(path) {
+                Ok(()) => println!(
+                    "eval: wrote {} agents to {} (reuse with BRAIN_EVAL_READ_ONLY_AGENTS={})",
+                    p.len(),
+                    path.display(),
+                    path.display()
+                ),
+                Err(e) => warn!(error = %e, "failed to write agent manifest"),
             }
         }
 

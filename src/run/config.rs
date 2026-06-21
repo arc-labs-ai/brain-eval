@@ -39,6 +39,16 @@ pub struct RunConfig {
     /// single-fact retrieval, where the answer is one item and "is it in
     /// the retrieved list at all" is a clean signal.
     pub question_types: Option<Vec<String>>,
+    /// When set, write the per-conversation `agent_id` manifest to this
+    /// path during an ingesting run, so a later `read_only_agents` run can
+    /// re-query the populated store without re-ingesting.
+    /// `BRAIN_EVAL_PERSIST_AGENTS`.
+    pub persist_agents: Option<PathBuf>,
+    /// When set, SKIP ingest and reconnect to the agents in this manifest,
+    /// running only retrieval + judging against the already-populated
+    /// store — read-path iteration with no write cost.
+    /// `BRAIN_EVAL_READ_ONLY_AGENTS`.
+    pub read_only_agents: Option<PathBuf>,
 }
 
 impl RunConfig {
@@ -52,6 +62,8 @@ impl RunConfig {
             output_dir: PathBuf::from("target/eval-reports"),
             reporters: vec![ReporterKind::Json, ReporterKind::Text],
             question_types: None,
+            persist_agents: None,
+            read_only_agents: None,
         }
     }
 
@@ -108,6 +120,15 @@ impl RunConfig {
             })
             .filter(|v| !v.is_empty());
 
+        let persist_agents = std::env::var("BRAIN_EVAL_PERSIST_AGENTS")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .map(PathBuf::from);
+        let read_only_agents = std::env::var("BRAIN_EVAL_READ_ONLY_AGENTS")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .map(PathBuf::from);
+
         Ok(Self {
             endpoint,
             max_questions,
@@ -115,6 +136,8 @@ impl RunConfig {
             output_dir: PathBuf::from(output_dir),
             reporters,
             question_types,
+            persist_agents,
+            read_only_agents,
         })
     }
 
