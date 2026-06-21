@@ -89,9 +89,7 @@ async fn run_isolation(endpoint: SocketAddr) -> Result<ScenarioOutcome, HarnessE
     agent_a
         .client()
         .encode(
-            &EncodeBuilder::new(secret.as_str())
-                .deduplicate(false)
-                .build(),
+            &EncodeBuilder::new(secret.as_str()).build(),
         )
         .await?;
 
@@ -101,13 +99,13 @@ async fn run_isolation(endpoint: SocketAddr) -> Result<ScenarioOutcome, HarnessE
     agent_a.close().await?;
     agent_b.close().await?;
 
-    if any_text_contains(&b_hits.hits, &marker) {
+    if any_text_contains(&b_hits.memories, &marker) {
         return Ok(ScenarioOutcome::fail(
             NAME,
             "agent B recalled agent A's memory — isolation breach",
         ));
     }
-    if !any_text_contains(&a_hits.hits, &marker) {
+    if !any_text_contains(&a_hits.memories, &marker) {
         return Ok(ScenarioOutcome::fail(
             NAME,
             "agent A could not recall its own just-written memory",
@@ -136,11 +134,11 @@ async fn run_forget(endpoint: SocketAddr) -> Result<ScenarioOutcome, HarnessErro
 
     let enc = h
         .client()
-        .encode(&EncodeBuilder::new(text.as_str()).deduplicate(false).build())
+        .encode(&EncodeBuilder::new(text.as_str()).build())
         .await?;
 
     let before = h.recall(&marker, 10).await?;
-    if !any_text_contains(&before.hits, &marker) {
+    if !any_text_contains(&before.memories, &marker) {
         h.close().await?;
         return Ok(ScenarioOutcome::fail(
             NAME,
@@ -155,7 +153,7 @@ async fn run_forget(endpoint: SocketAddr) -> Result<ScenarioOutcome, HarnessErro
     let after = h.recall(&marker, 10).await?;
     h.close().await?;
 
-    if any_text_contains(&after.hits, &marker) {
+    if any_text_contains(&after.memories, &marker) {
         return Ok(ScenarioOutcome::fail(
             NAME,
             "memory still recalled after a hard FORGET",
@@ -191,17 +189,17 @@ async fn run_txn(endpoint: SocketAddr) -> Result<ScenarioOutcome, HarnessError> 
         })
         .await?;
 
-    let mut enc = EncodeBuilder::new(text.as_str()).deduplicate(false).build();
+    let mut enc = EncodeBuilder::new(text.as_str()).build();
     enc.txn_id = Some(txn_id);
     h.client().encode(&enc).await?;
 
     // Read inside the txn must see the buffered write.
     let mut in_txn = RecallBuilder::new(marker.as_str())
-        .top_k(10)
+        .max_results(10)
         .include_text(true)
         .build();
     in_txn.txn_id = Some(txn_id);
-    let in_txn_hits = h.client().recall(&in_txn).await?;
+    let in_txn_hits = h.client().recall(&in_txn).await?.memories;
 
     h.client().txn_commit(&TxnCommitRequest { txn_id }).await?;
 
@@ -215,7 +213,7 @@ async fn run_txn(endpoint: SocketAddr) -> Result<ScenarioOutcome, HarnessError> 
             "in-txn read did not see the txn's buffered write",
         ));
     }
-    if !any_text_contains(&after.hits, &marker) {
+    if !any_text_contains(&after.memories, &marker) {
         return Ok(ScenarioOutcome::fail(
             NAME,
             "committed write not visible to a plain read",

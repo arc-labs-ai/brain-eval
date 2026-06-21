@@ -67,6 +67,11 @@ pub struct QuestionResult {
     pub ground_truth: String,
     /// Candidate answer produced by [`crate::run::synthesize::synthesize_answer`].
     pub system_answer: String,
+    /// How the router shaped this answer: `single` | `many` | `none`
+    /// | `error`. Lets the report split accuracy and precision by whether
+    /// the router returned one memory, a set, or honestly declined — the
+    /// read path is a smart router, not a flat top-k list.
+    pub answer_kind: String,
     /// Judge verdict.
     pub verdict: Verdict,
     /// Numeric score (0.0 / 0.5 / 1.0).
@@ -88,6 +93,13 @@ pub struct QuestionResult {
     pub retrieved_memory_contents: Vec<String>,
     /// Free-text reasoning from the judge.
     pub judge_reasoning: String,
+    /// Whether the retrieved memories fully support the gold answer, per
+    /// the support judge (answer-supporting context recall). `None` when
+    /// no LLM judge was configured — the support verdict needs the LLM,
+    /// so a heuristic run leaves it unjudged rather than guessing.
+    pub context_supported: Option<bool>,
+    /// Free-text reasoning behind `context_supported`.
+    pub context_support_reasoning: String,
     /// `true` if the ingest pipeline returned an error.
     pub ingestion_failed: bool,
     /// `true` if the RECALL call returned an error.

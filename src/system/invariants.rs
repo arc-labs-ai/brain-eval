@@ -41,7 +41,6 @@ use std::time::{Duration, Instant};
 use brain_db_sdk::new_id;
 use brain_db_sdk::wire::types::{
     EdgeKindWire, EncodeRequest, ErrorCategoryWire, ForgetMode, ForgetRequest, LinkRequest,
-    MemoryKindWire,
 };
 use brain_db_sdk::BrainError;
 
@@ -344,18 +343,15 @@ async fn run_slot_version(endpoint: SocketAddr) -> Result<ScenarioOutcome, Harne
 // Helpers.
 // ===========================================================================
 
-/// A hand-built ENCODE with a controlled `request_id` and dedup OFF (the
-/// builder mints a fresh id every call, which idempotency testing can't use).
+/// A hand-built ENCODE with a controlled `request_id` (the builder mints
+/// a fresh id every call, which idempotency testing can't use).
 fn encode_req(text: &str, request_id: [u8; 16]) -> EncodeRequest {
     EncodeRequest {
         text: text.to_string(),
         context_id: 0,
-        kind: MemoryKindWire::Semantic,
-        salience_hint: 0.5,
-        edges: Vec::new(),
         request_id,
         txn_id: None,
-        deduplicate: false,
+        occurred_at_unix_nanos: None,
     }
 }
 
@@ -406,7 +402,7 @@ async fn recall_contains(
     target: u128,
 ) -> Result<bool, HarnessError> {
     let out = h.recall(cue, 20).await?;
-    Ok(out.hits.iter().any(|m| m.memory_id == target))
+    Ok(out.memories.iter().any(|m| m.memory_id == target))
 }
 
 /// First 12 hex chars of a 16-byte id — a unique per-run marker.

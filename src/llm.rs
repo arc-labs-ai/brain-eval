@@ -221,12 +221,40 @@ fn parse_err(e: serde_json::Error) -> CallError {
     }
 }
 
-/// Truncate to `max` chars with an ellipsis (for error/log messages).
+/// Truncate to at most `max` bytes with an ellipsis (for error/log
+/// messages). Cuts on a UTF-8 char boundary so a multibyte sequence is
+/// never split — this runs on error/fallback paths (API error bodies,
+/// unparseable model replies) where the input is untrusted, so slicing
+/// `&s[..max]` directly would panic exactly when something is already wrong.
 #[must_use]
 pub fn truncate(s: &str, max: usize) -> String {
     if s.len() <= max {
-        s.to_string()
-    } else {
-        format!("{}…", &s[..max])
+        return s.to_string();
+    }
+    let end = (0..=max)
+        .rev()
+        .find(|&i| s.is_char_boundary(i))
+        .unwrap_or(0);
+    format!("{}…", &s[..end])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::truncate;
+
+    #[test]
+    fn truncate_short_string_is_unchanged() {
+        assert_eq!(truncate("hi", 300), "hi");
+    }
+
+    #[test]
+    fn truncate_never_splits_a_multibyte_codepoint() {
+        // "€" is 3 bytes; a byte-cut at max=1 or 2 lands mid-codepoint and
+        // would panic on `&s[..max]`. The boundary-safe cut must not.
+        let s = "€€€€€"; // 15 bytes, 5 chars
+        for max in 0..=15 {
+            let out = truncate(s, max); // must not panic for any cut point
+            assert!(s.starts_with(out.trim_end_matches('…')));
+        }
     }
 }

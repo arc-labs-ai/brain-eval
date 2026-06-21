@@ -93,7 +93,7 @@ async fn ingest_recall_judge_round_trip() {
             .recall(&inst.question, 5)
             .await
             .expect("recall should succeed");
-        if recall.hits.is_empty() {
+        if recall.memories.is_empty() {
             eprintln!(
                 "warning: no recall hits for {} — index may be cold",
                 inst.question_id
@@ -101,7 +101,7 @@ async fn ingest_recall_judge_round_trip() {
         }
 
         let candidate = recall
-            .hits
+            .memories
             .iter()
             .map(|m| m.text.clone())
             .collect::<Vec<_>>()

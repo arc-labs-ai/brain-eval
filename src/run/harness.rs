@@ -6,18 +6,22 @@
 //! every agent maps to its own shard slice, so agent A's memories are
 //! never visible to agent B (Brain's natural routing rule).
 //!
-//! Two methods cover the eval surface today:
+//! Two methods cover the eval surface:
 //!
 //! - [`BrainEvalHarness::ingest`] — one ENCODE per user turn. Returns the
 //!   ids of the freshly written memories so callers can correlate
 //!   downstream.
-//! - [`BrainEvalHarness::recall`] — issue a RECALL with `include_text`
-//!   set, returning a [`RecallOutcome`] with hits + per-call latency.
+//! - [`BrainEvalHarness::recall`] — issue a RECALL and return a
+//!   [`RecallOutcome`] carrying the server's *answer shape*: the memories
+//!   the smart router decided to return, tagged `Single` (one memory),
+//!   `Many` (a set), or `None` (honest abstention). There is no read mode
+//!   and no separate retrieval lane exposed on the wire — the server runs
+//!   one unified real-memory path and the router shapes the result.
 
 use std::net::SocketAddr;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
-use brain_db_sdk::wire::types::{MemoryResult, WireMemoryId, WireUuid};
+use brain_db_sdk::wire::types::{AnswerKindWire, MemoryResult, WireMemoryId, WireUuid};
 use brain_db_sdk::{BrainClient, BrainError, ClientConfig, EncodeBuilder, RecallBuilder};
 
 use crate::core::instance::TurnRecord;
@@ -55,8 +59,14 @@ impl BrainEvalHarness {
         addr: SocketAddr,
         agent_id: WireUuid,
     ) -> Result<Self, HarnessError> {
+        // The eval write path triggers full server-side extraction
+        // (pattern + LLM) on a CPU-only dev box, where a single ENCODE can
+        // far exceed the SDK's 30s default. A short deadline fails the whole
+        // session on one slow turn (the dreaded INGEST-FAIL); give ingest
+        // generous headroom so latency, not a timeout, is what we measure.
         let config = ClientConfig {
             agent_id,
+            request_timeout: Some(Duration::from_secs(300)),
             ..ClientConfig::default()
         };
         let client = BrainClient::connect_with(addr, config).await?;
@@ -81,6 +91,11 @@ impl BrainEvalHarness {
     /// was authored against user utterances. The returned
     /// [`IngestOutcome`] carries per-turn outcomes plus wall-clock
     /// latency for the entire ingest.
+    ///
+    /// Deduplication is not a client knob: Brain's write router decides
+    /// whether a write merges into an existing near-duplicate. We still
+    /// count the server's `was_deduplicated` verdict for write-quality
+    /// reporting.
     pub async fn ingest(&self, turns: &[TurnRecord]) -> Result<IngestOutcome, HarnessError> {
         let start = Instant::now();
         let mut stored_ids: Vec<WireMemoryId> = Vec::new();
@@ -95,9 +110,7 @@ impl BrainEvalHarness {
                 continue;
             }
             attempted += 1;
-            let request = EncodeBuilder::new(turn.content.as_str())
-                .deduplicate(true)
-                .build();
+            let request = EncodeBuilder::new(turn.content.as_str()).build();
             let resp = self.client.encode(&request).await?;
             if resp.was_deduplicated {
                 deduplicated += 1;
@@ -115,17 +128,31 @@ impl BrainEvalHarness {
         })
     }
 
-    /// Run a RECALL with `include_text` so the eval can read memory
-    /// contents back for substring scoring.
-    pub async fn recall(&self, cue: &str, top_k: u32) -> Result<RecallOutcome, HarnessError> {
+    /// Run a RECALL and return the server's answer shape.
+    ///
+    /// There is no read mode: the server always runs the unified
+    /// real-memory path behind a smart router that decides whether to
+    /// return one memory (`Single`), a set (`Many`), or nothing at all
+    /// (`None`, an honest abstention). `max_results` is a safety cap on
+    /// the returned set size — not a ranking knob; the answer's shape
+    /// comes from the stored data, never from this count.
+    pub async fn recall(
+        &self,
+        cue: &str,
+        max_results: u32,
+    ) -> Result<RecallOutcome, HarnessError> {
         let start = Instant::now();
         let request = RecallBuilder::new(cue)
-            .top_k(top_k)
+            .max_results(max_results)
             .include_text(true)
             .build();
-        let hits = self.client.recall(&request).await?;
+        let answer = self.client.recall(&request).await?;
         let latency_ms = elapsed_ms(start);
-        Ok(RecallOutcome { hits, latency_ms })
+        Ok(RecallOutcome {
+            answer_kind: answer.answer_kind,
+            memories: answer.memories,
+            latency_ms,
+        })
     }
 
     /// Close the underlying client.
@@ -142,19 +169,36 @@ pub struct IngestOutcome {
     pub stored_ids: Vec<WireMemoryId>,
     /// Number of ENCODE attempts (user turns processed).
     pub attempted: u64,
-    /// Number of attempts that hit the fingerprint dedupe path.
+    /// Number of attempts the server merged into a near-duplicate.
     pub deduplicated: u64,
     /// Wall-clock time for the whole ingest, in milliseconds.
     pub latency_ms: u64,
 }
 
-/// Outcome of one [`BrainEvalHarness::recall`] call.
+/// Outcome of one [`BrainEvalHarness::recall`] call — the memories the
+/// server's smart router returned, tagged with the shape it chose.
+///
+/// `answer_kind` is the router's verdict: `Single` (exactly one memory),
+/// `Many` (a set), or `None` (it declined — `memories` is empty). The
+/// caller never sees a separate retrieval lane; the router has already
+/// decided what to surface.
 #[derive(Debug, Clone)]
 pub struct RecallOutcome {
-    /// Memory hits returned by the substrate, in server order.
-    pub hits: Vec<MemoryResult>,
+    /// The shape of the answer the router returned.
+    pub answer_kind: AnswerKindWire,
+    /// The memories the router surfaced. Empty iff `answer_kind` is
+    /// `None`.
+    pub memories: Vec<MemoryResult>,
     /// Wall-clock time for the RECALL, in milliseconds.
     pub latency_ms: u64,
+}
+
+impl RecallOutcome {
+    /// The router declined — no memory answers this cue.
+    #[must_use]
+    pub fn is_abstention(&self) -> bool {
+        matches!(self.answer_kind, AnswerKindWire::None)
+    }
 }
 
 fn elapsed_ms(start: Instant) -> u64 {

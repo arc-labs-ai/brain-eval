@@ -19,11 +19,14 @@ use std::process::ExitCode;
 use brain_eval::acceptance::{run_acceptance, AcceptanceConfig};
 use brain_eval::core::benchmark::Benchmark;
 use brain_eval::datasets::{
-    dmr::DmrBenchmark, locomo::LocomoBenchmark, longmemeval::LongMemEvalS, smoke::SmokeBenchmark,
+    dmr::DmrBenchmark, lexical_stress::LexicalStressBenchmark, locomo::LocomoBenchmark,
+    longmemeval::LongMemEvalS, paraphrase_stress::ParaphraseStressBenchmark, smoke::SmokeBenchmark,
+    supersession_stress::SupersessionStressBenchmark,
 };
 use brain_eval::report::{
-    dmr_competitor_baselines, locomo_competitor_baselines, longmemeval_s_competitor_baselines,
-    smoke_competitor_baselines, CompetitorBaselines,
+    dmr_competitor_baselines, lexical_stress_competitor_baselines, locomo_competitor_baselines,
+    longmemeval_s_competitor_baselines, paraphrase_stress_competitor_baselines,
+    smoke_competitor_baselines, supersession_stress_competitor_baselines, CompetitorBaselines,
 };
 use brain_eval::run::{EvalRunner, RunConfig};
 use brain_eval::soak::{run_soak, SoakConfig};
@@ -54,16 +57,31 @@ async fn async_main() -> ExitCode {
     let benchmark_name = args[0].as_str();
     let endpoint_override = parse_endpoint_flag(&args[1..]);
 
-    // System commands that drive the server directly (not dataset evals).
+    // System / offline commands that don't run a dataset eval.
     match benchmark_name {
         "acceptance" => return acceptance_cmd(resolve_endpoint(endpoint_override)).await,
         "soak" => return soak_cmd(resolve_endpoint(endpoint_override)).await,
+        // Recompute a full report from a streamed partial-results file —
+        // recovers metrics from a run that was interrupted mid-flight.
+        "summary" | "report" => return summary_cmd(&args[1..]),
         _ => {}
     }
 
     // Resolve the benchmark + its competitor table.
     let (benchmark, competitors): (Box<dyn Benchmark>, CompetitorBaselines) = match benchmark_name {
         "smoke" => (Box::new(SmokeBenchmark), smoke_competitor_baselines),
+        "lexical-stress" => (
+            Box::new(LexicalStressBenchmark),
+            lexical_stress_competitor_baselines,
+        ),
+        "paraphrase-stress" => (
+            Box::new(ParaphraseStressBenchmark),
+            paraphrase_stress_competitor_baselines,
+        ),
+        "supersession-stress" => (
+            Box::new(SupersessionStressBenchmark),
+            supersession_stress_competitor_baselines,
+        ),
         "dmr" => (Box::new(DmrBenchmark), dmr_competitor_baselines),
         "longmemeval-s" | "longmemeval" | "lme" => {
             (Box::new(LongMemEvalS), longmemeval_s_competitor_baselines)
@@ -222,17 +240,86 @@ fn parse_endpoint_flag(rest: &[String]) -> Option<SocketAddr> {
     None
 }
 
+/// `brain-eval summary <partial.jsonl>` — recompute the full metrics
+/// from a streamed per-question results file. The runner streams every
+/// graded question to `<output_dir>/<id>-<ts>.partial.jsonl` as it goes,
+/// so even an interrupted run leaves a complete record to summarize.
+fn summary_cmd(rest: &[String]) -> ExitCode {
+    let Some(path) = rest.iter().find(|a| !a.starts_with("--")) else {
+        eprintln!("usage: brain-eval summary <partial.jsonl>");
+        return ExitCode::from(2);
+    };
+    let text = match std::fs::read_to_string(path) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("error: cannot read {path}: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    let mut results = Vec::new();
+    let mut unparseable = 0usize;
+    for line in text.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        match serde_json::from_str::<brain_eval::core::outcome::QuestionResult>(line) {
+            Ok(r) => results.push(r),
+            Err(_) => unparseable += 1,
+        }
+    }
+    if results.is_empty() {
+        eprintln!("error: no parseable question results in {path}");
+        return ExitCode::from(1);
+    }
+    let metrics = brain_eval::score::metrics::compute_full_metrics(&results);
+    println!("=== summary :: {path} ===");
+    println!(
+        "parsed    : {} graded questions ({unparseable} unparseable lines skipped)",
+        results.len()
+    );
+    print_metrics(&metrics);
+    ExitCode::SUCCESS
+}
+
 fn print_summary(report: &brain_eval::report::BenchmarkReport) {
-    let m = &report.metrics;
     println!("=== {} ===", report.meta.benchmark_name);
+    print_metrics(&report.metrics);
+}
+
+/// Render the headline metrics, the answer-shape breakdown (one memory
+/// vs a set vs honest abstention — how the router actually behaves), and
+/// the committed-answer precision (the hard invariant: never confidently
+/// wrong).
+fn print_metrics(m: &brain_eval::score::metrics::EvalMetrics) {
     println!("questions : {}", m.total_questions);
     println!(
         "accuracy  : {:.4}   ({}/{}/{} correct/partial/incorrect)",
         m.accuracy, m.correct, m.partial, m.incorrect
     );
+    let s = &m.answer_shape;
+    println!(
+        "shape     : single {} (acc {:.3}) | many {} (acc {:.3}) | abstained {} (acc {:.3}) | errored {}",
+        s.single, s.single_accuracy, s.many, s.many_accuracy, s.abstained, s.abstained_accuracy, s.errored,
+    );
+    println!(
+        "precision : {:.4}   ({} committed answers; fraction never scored incorrect)",
+        s.committed_precision, s.committed
+    );
+    // Headline retrieval metric: did Brain surface the supporting context?
+    // (LLM-judged, semantic — see Kamalloo 2023 / NoLiMa.)
+    if let Some(c) = &m.context_recall {
+        println!(
+            "ctx-recall: {:.4}   ({}/{} answer-supporting; LLM-judged headline)",
+            c.supported_rate, c.n_supported, c.n_judged
+        );
+    } else {
+        println!("ctx-recall: n/a    (no LLM judge configured — run with --features live-llm)");
+    }
+    // Substring recall@k is a DEPRECATED diagnostic kept only to contrast
+    // with ctx-recall; it rewards lexical overlap, not retrieval.
     if let Some(r) = &m.retrieval {
         println!(
-            "recall@1  : {:.4}    recall@5 : {:.4}    recall@10 : {:.4}",
+            "recall@k  : @1 {:.4}   @5 {:.4}   @10 {:.4}   (DEPRECATED substring diagnostic)",
             r.recall_at_1, r.recall_at_5, r.recall_at_10
         );
     }
@@ -251,6 +338,9 @@ fn print_usage() {
          \n\
          benchmarks:\n\
          \x20 smoke           compiled-in Aurora corpus (zero config; Recall@1 canary)\n\
+         \x20 lexical-stress  compiled-in no-overlap set (proves semantic, not substring, retrieval)\n\
+         \x20 paraphrase-stress    compiled-in generated no-overlap triples + distractors (anti-overfit)\n\
+         \x20 supersession-stress  compiled-in generated OLD->NEW updates (current-vs-prior direction)\n\
          \x20 dmr             DMR / MemGPT (needs BRAIN_EVAL_DATASETS_DIR)\n\
          \x20 longmemeval-s   LongMemEval-S (needs BRAIN_EVAL_DATASETS_DIR)\n\
          \x20 locomo          LoCoMo (needs BRAIN_EVAL_DATASETS_DIR)\n\
@@ -259,8 +349,11 @@ fn print_usage() {
          \x20 acceptance      v1.0 acceptance suite (latency/throughput/recall/scenarios)\n\
          \x20                 BRAIN_EVAL_RESTART_RECOVERY=1 adds the restart-recovery gate\n\
          \x20 soak            sustained workload + drift sampling (BRAIN_EVAL_SOAK_SECS)\n\
+         \x20 summary <file>  recompute metrics from a streamed .partial.jsonl\n\
+         \x20                 (recover results from an interrupted run)\n\
          \n\
          env: BRAIN_EVAL_ENDPOINT, BRAIN_EVAL_MAX_QUESTIONS, BRAIN_EVAL_TOP_K,\n\
-         \x20    BRAIN_EVAL_OUTPUT_DIR, BRAIN_EVAL_FORMATS"
+         \x20    BRAIN_EVAL_OUTPUT_DIR, BRAIN_EVAL_FORMATS, BRAIN_EVAL_QUESTION_TYPES,\n\
+         \x20    BRAIN_EVAL_EXTRACTION_DRAIN"
     );
 }

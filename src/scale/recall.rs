@@ -93,7 +93,7 @@ pub async fn run_recall_quality(
             "Reference note {i}: the marker is {}. Surrounded by ordinary prose so retrieval has to discriminate.",
             nonce(salt, i)
         );
-        let req = EncodeBuilder::new(text.as_str()).deduplicate(false).build();
+        let req = EncodeBuilder::new(text.as_str()).build();
         client.encode(&req).await?;
     }
 
@@ -102,10 +102,10 @@ pub async fn run_recall_quality(
     for i in 0..n {
         let needle = nonce(salt, i);
         let req = RecallBuilder::new(needle.as_str())
-            .top_k(top_k)
+            .max_results(top_k)
             .include_text(true)
             .build();
-        let hits = client.recall(&req).await?;
+        let hits = client.recall(&req).await?.memories;
         if let Some(rank) = hits.iter().position(|m| m.text.contains(&needle)) {
             hit_at_k += 1;
             if rank == 0 {

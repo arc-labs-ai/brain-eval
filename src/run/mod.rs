@@ -5,7 +5,7 @@
 //!   to an external server.
 //! - [`harness`]   — `BrainEvalHarness` wrapping `brain-db-sdk`.
 //! - [`metrics`]   — minimal `/metrics` scraper for the soak / storage gates.
-//! - [`synthesize`] — top-K → candidate answer.
+//! - [`synthesize`] — answer shape → candidate answer.
 //! - [`runner`]    — `EvalRunner`: orchestrates ingest → recall → judge.
 
 pub mod config;

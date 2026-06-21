@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::core::instance::QuestionType;
 use crate::core::outcome::{JudgeResult, QuestionResult};
+use crate::score::context_recall::{compute_context_recall, ContextRecallStats};
 use crate::score::latency::{compute_latency_stats, LatencyStats};
 use crate::score::retrieval::{compute_retrieval_stats, RetrievalStats};
 
@@ -35,9 +36,24 @@ pub struct EvalMetrics {
     pub latency: LatencyStats,
     /// Token usage summary.
     pub tokens: TokenStats,
-    /// Retrieval quality (Recall@K, NDCG@K). `None` when no question
-    /// returned any retrieved memories.
+    /// Answer-supporting context recall — the headline retrieval metric.
+    /// Asks an LLM judge whether the retrieved memories fully support the
+    /// gold answer, decoupled from how the synthesizer phrased it. `None`
+    /// on a heuristic-only run (the support judge needs the LLM). This
+    /// replaces substring recall@k as the retrieval headline.
+    pub context_recall: Option<ContextRecallStats>,
+    /// Substring recall@k (DEPRECATED diagnostic — see Kamalloo 2023 /
+    /// NoLiMa). Rewards lexical overlap between the gold answer string and
+    /// a retrieved memory, so it scores 0 on correct-but-paraphrased
+    /// retrieval. Kept only as a diagnostic against the headline
+    /// `context_recall`; do not read it as "did we retrieve the answer".
+    /// `None` when no question returned any memories (all abstentions).
     pub retrieval: Option<RetrievalStats>,
+    /// Accuracy and precision split by the router's answer shape
+    /// (one memory / a set / honest abstention). This is how the read
+    /// path actually behaves now that recall is a smart router, not a
+    /// flat top-k list.
+    pub answer_shape: AnswerShapeMetrics,
     /// Questions where session ingestion failed (infrastructure error,
     /// not model behaviour).
     pub ingestion_errors: usize,
@@ -45,6 +61,40 @@ pub struct EvalMetrics {
     pub retrieval_errors: usize,
     /// Encode-side quality (accepted / merged / discarded counters).
     pub write_quality: WriteQualityMetrics,
+}
+
+/// Accuracy + precision split by the router's answer shape.
+///
+/// The headline `EvalMetrics::accuracy` answers "how often is the system
+/// right". This breakdown answers the two questions that matter for a
+/// memory database: *when it commits to an answer, is it ever wrong*
+/// (precision — the hard invariant) and *what shape did the router
+/// choose* (one memory / a set / honest abstention).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AnswerShapeMetrics {
+    /// `single` answers returned (the router surfaced exactly one memory).
+    pub single: usize,
+    /// Mean score among `single` answers.
+    pub single_accuracy: f64,
+    /// `many` answers returned (the router surfaced a set of memories).
+    pub many: usize,
+    /// Mean score among `many` answers.
+    pub many_accuracy: f64,
+    /// Honest abstentions returned (`none` — the router surfaced nothing).
+    pub abstained: usize,
+    /// Mean score among abstentions (correct when the truth was
+    /// genuinely unanswerable, wrong when the system gave up on an
+    /// answerable question).
+    pub abstained_accuracy: f64,
+    /// Questions whose RECALL errored (infrastructure, not model).
+    pub errored: usize,
+    /// Committed answers: `single` or `many` where the system actually
+    /// asserted something (did not decline).
+    pub committed: usize,
+    /// Of committed answers, the fraction that were NOT scored
+    /// `Incorrect`. The hard invariant: a committed answer must never be
+    /// confidently wrong. `1.0` = the system never asserted a falsehood.
+    pub committed_precision: f64,
 }
 
 /// Accuracy for a single evaluation dimension.
@@ -137,11 +187,82 @@ pub fn compute_full_metrics(results: &[QuestionResult]) -> EvalMetrics {
         incorrect,
         latency: compute_latency_stats(results),
         tokens: compute_token_stats(results),
+        context_recall: compute_context_recall(results),
         retrieval: compute_retrieval_stats(results),
+        answer_shape: compute_answer_shape(results),
         ingestion_errors,
         retrieval_errors,
         write_quality: compute_write_quality(results),
     }
+}
+
+/// A system answer that declines rather than asserts. Mirrors the
+/// abstention phrases the judge recognises.
+fn is_decline(answer: &str) -> bool {
+    let trimmed = answer.trim();
+    if trimmed.is_empty() {
+        return true;
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    lower.contains("don't know")
+        || lower.contains("do not know")
+        || lower.contains("not sure")
+        || lower.contains("unknown")
+        || lower.contains("not mentioned")
+        || lower.contains("no information")
+}
+
+/// Split accuracy + precision by the router's answer shape.
+fn compute_answer_shape(results: &[QuestionResult]) -> AnswerShapeMetrics {
+    let mut m = AnswerShapeMetrics::default();
+    let (mut single_sum, mut many_sum, mut abstained_sum) = (0.0_f64, 0.0_f64, 0.0_f64);
+    let mut committed_not_wrong = 0usize;
+
+    for r in results {
+        let committed_assertion = !is_decline(&r.system_answer);
+        match r.answer_kind.as_str() {
+            "single" => {
+                m.single += 1;
+                single_sum += r.score;
+                if committed_assertion {
+                    m.committed += 1;
+                    if !matches!(r.verdict, crate::core::outcome::Verdict::Incorrect) {
+                        committed_not_wrong += 1;
+                    }
+                }
+            }
+            "many" => {
+                m.many += 1;
+                many_sum += r.score;
+                if committed_assertion {
+                    m.committed += 1;
+                    if !matches!(r.verdict, crate::core::outcome::Verdict::Incorrect) {
+                        committed_not_wrong += 1;
+                    }
+                }
+            }
+            "none" => {
+                m.abstained += 1;
+                abstained_sum += r.score;
+            }
+            _ => m.errored += 1,
+        }
+    }
+
+    #[allow(clippy::cast_precision_loss)]
+    let mean = |sum: f64, n: usize| if n == 0 { 0.0 } else { sum / n as f64 };
+    m.single_accuracy = mean(single_sum, m.single);
+    m.many_accuracy = mean(many_sum, m.many);
+    m.abstained_accuracy = mean(abstained_sum, m.abstained);
+    #[allow(clippy::cast_precision_loss)]
+    {
+        m.committed_precision = if m.committed == 0 {
+            1.0
+        } else {
+            committed_not_wrong as f64 / m.committed as f64
+        };
+    }
+    m
 }
 
 fn aggregate_dimensions(
@@ -215,5 +336,90 @@ fn compute_write_quality(results: &[QuestionResult]) -> WriteQualityMetrics {
         total_deduplicated,
         store_rate,
         dedup_rate,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::instance::QuestionType;
+    use crate::core::outcome::Verdict;
+
+    fn qr(answer_kind: &str, verdict: Verdict, system_answer: &str) -> QuestionResult {
+        QuestionResult {
+            question_id: "q".into(),
+            question_type: QuestionType::SingleHop,
+            question: String::new(),
+            ground_truth: String::new(),
+            system_answer: system_answer.into(),
+            answer_kind: answer_kind.into(),
+            verdict,
+            score: verdict.score(),
+            write_latency_ms: 0,
+            read_latency_ms: 0,
+            tokens_write: 0,
+            tokens_read: 0,
+            memories_retrieved: 0,
+            retrieved_memory_contents: Vec::new(),
+            judge_reasoning: String::new(),
+            context_supported: None,
+            context_support_reasoning: String::new(),
+            ingestion_failed: false,
+            retrieval_failed: false,
+            write_attempted: 0,
+            write_stored: 0,
+            write_deduplicated: 0,
+        }
+    }
+
+    #[test]
+    fn answer_shape_splits_by_kind() {
+        let results = vec![
+            qr("single", Verdict::Correct, "Berlin"),
+            qr("many", Verdict::Correct, "a, b"),
+            qr("many", Verdict::Partial, "1. ..."),
+            qr("none", Verdict::Correct, "I don't know."),
+            qr("error", Verdict::Incorrect, ""),
+        ];
+        let m = compute_answer_shape(&results);
+        assert_eq!(m.single, 1);
+        assert_eq!(m.many, 2);
+        assert_eq!(m.abstained, 1);
+        assert_eq!(m.errored, 1);
+    }
+
+    #[test]
+    fn committed_precision_drops_only_on_a_confident_wrong_answer() {
+        // Two correct committed answers + one that's WRONG = a confident
+        // falsehood. 2/3 committed answers were not wrong.
+        let results = vec![
+            qr("single", Verdict::Correct, "Berlin"),
+            qr("many", Verdict::Partial, "a, b"),
+            qr("many", Verdict::Incorrect, "Paris"),
+        ];
+        let m = compute_answer_shape(&results);
+        assert_eq!(m.committed, 3);
+        assert!((m.committed_precision - 2.0 / 3.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_decline_is_not_a_committed_answer() {
+        // A read that synthesized "I don't know." asserted nothing, so it
+        // never counts against precision.
+        let results = vec![
+            qr("single", Verdict::Correct, "Berlin"),
+            qr("many", Verdict::Incorrect, "I don't know."),
+        ];
+        let m = compute_answer_shape(&results);
+        assert_eq!(m.committed, 1);
+        assert!((m.committed_precision - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn no_committed_answers_is_vacuously_perfect_precision() {
+        let results = vec![qr("none", Verdict::Correct, "I don't know.")];
+        let m = compute_answer_shape(&results);
+        assert_eq!(m.committed, 0);
+        assert!((m.committed_precision - 1.0).abs() < f64::EPSILON);
     }
 }

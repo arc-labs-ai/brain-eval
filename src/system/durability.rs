@@ -62,7 +62,7 @@ async fn run_restart_recovery(
             .map_err(|e| format!("connect #1: {e}"))?;
         for i in 0..N {
             let text = format!("{marker}: durable fact number {i}");
-            let req = EncodeBuilder::new(text.as_str()).deduplicate(false).build();
+            let req = EncodeBuilder::new(text.as_str()).build();
             h.client()
                 .encode(&req)
                 .await
@@ -90,7 +90,11 @@ async fn run_restart_recovery(
             .recall(&marker, (N as u32) * 2)
             .await
             .map_err(|e| format!("recall after restart: {e}"))?;
-        let hits = out.hits.iter().filter(|m| m.text.contains(&marker)).count();
+        let hits = out
+            .memories
+            .iter()
+            .filter(|m| m.text.contains(&marker))
+            .count();
         h.close().await.map_err(|e| format!("close #2: {e}"))?;
         hits
     };

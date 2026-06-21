@@ -47,10 +47,10 @@ async fn run(endpoint: SocketAddr) -> Result<ScenarioOutcome, HarnessError> {
     let text =
         format!("During the project kickoff, {full_name} agreed to lead the migration effort.");
 
-    // Encode; deduplicate(false) so the extractor stages always enqueue.
+    // Encode so the extractor stages enqueue.
     let enc = h
         .client()
-        .encode(&EncodeBuilder::new(text.as_str()).deduplicate(false).build())
+        .encode(&EncodeBuilder::new(text.as_str()).build())
         .await?;
 
     // If the server reports no extractor stage was queued, extraction is

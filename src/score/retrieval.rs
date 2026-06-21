@@ -56,6 +56,11 @@ fn mean_recall_at_k(results: &[QuestionResult], k: usize) -> f64 {
         if r.retrieval_failed || r.ingestion_failed {
             continue;
         }
+        // Episodic-only diagnostic: grounded / abstention answers carry
+        // no ranked memory list, so they don't belong in recall@K.
+        if r.retrieved_memory_contents.is_empty() {
+            continue;
+        }
         let ground = r.ground_truth.to_lowercase();
         if ground.is_empty() {
             continue;
@@ -82,6 +87,9 @@ fn mean_ndcg_at_k(results: &[QuestionResult], k: usize) -> f64 {
     let mut count = 0_usize;
     for r in results {
         if r.retrieval_failed || r.ingestion_failed {
+            continue;
+        }
+        if r.retrieved_memory_contents.is_empty() {
             continue;
         }
         let ground = r.ground_truth.to_lowercase();

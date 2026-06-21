@@ -25,8 +25,9 @@ use crate::report::baselines::CompetitorBaselines;
 use crate::report::format::{json::JsonReporter, text::TextReporter, Reporter};
 use crate::report::shape::{BenchmarkMeta, BenchmarkReport};
 use crate::run::config::{ReporterKind, RunConfig};
-use crate::run::harness::BrainEvalHarness;
+use crate::run::harness::{BrainEvalHarness, RecallOutcome};
 use crate::run::synthesize::synthesize_answer;
+use brain_db_sdk::wire::types::AnswerKindWire;
 use crate::score::judge::judge_answer_heuristic;
 use crate::score::metrics::compute_full_metrics;
 
@@ -58,22 +59,19 @@ impl EvalRunner {
         }
     }
 
-    /// Compose an answer: the LLM synthesizer when configured, else the
-    /// heuristic top-K concatenation.
+    /// Compose an answer from a RECALL outcome: the LLM synthesizer when
+    /// configured, else the heuristic. Both branch on the answer shape
+    /// (grounded value / honest abstention / episodic snippets).
     #[cfg_attr(not(feature = "live-llm"), allow(clippy::unused_self))]
-    async fn synth_answer(
-        &self,
-        instance: &EvalInstance,
-        hits: &[brain_db_sdk::wire::types::MemoryResult],
-        top_k: usize,
-    ) -> String {
+    async fn synth_answer(&self, instance: &EvalInstance, outcome: &RecallOutcome) -> String {
+        let cap = self.config.max_results as usize;
         #[cfg(feature = "live-llm")]
         if let Some(synth) = &self.llm_synth {
             return synth
-                .synthesize(&instance.question, hits, instance.question_type, top_k)
+                .synthesize(&instance.question, outcome, instance.question_type, cap)
                 .await;
         }
-        synthesize_answer(&instance.question, hits, instance.question_type, top_k)
+        synthesize_answer(&instance.question, outcome, instance.question_type, cap)
     }
 
     /// Score one answer: the LLM judge when configured, else the heuristic.
@@ -99,6 +97,32 @@ impl EvalRunner {
         )
     }
 
+    /// Answer-supporting context recall: ask the support judge whether the
+    /// retrieved memories fully support the gold answer. `None` when no LLM
+    /// judge is configured — the support verdict needs the LLM, so a
+    /// heuristic run leaves the question unjudged rather than guessing.
+    /// Returns `(supported, reasoning)`.
+    #[cfg_attr(not(feature = "live-llm"), allow(clippy::unused_self))]
+    async fn judge_support(
+        &self,
+        instance: &EvalInstance,
+        retrieved: &[String],
+    ) -> (Option<bool>, String) {
+        #[cfg(feature = "live-llm")]
+        if let Some(judge) = &self.llm_judge {
+            return match judge
+                .judge_support(&instance.question, &instance.answer, retrieved)
+                .await
+            {
+                Some(v) => (Some(v.supported), v.reasoning),
+                None => (None, String::new()),
+            };
+        }
+        #[cfg(not(feature = "live-llm"))]
+        let _ = (instance, retrieved);
+        (None, String::new())
+    }
+
     /// Run `benchmark` end-to-end. The report is written to
     /// `config.output_dir/<benchmark_id>-<ts>.{json,txt}` and also
     /// returned.
@@ -120,6 +144,15 @@ impl EvalRunner {
             PathBuf::from(".")
         };
         let instances = benchmark.load(&datasets_dir)?;
+        // Type filter runs before the count cap so `max_questions` bounds
+        // the filtered set, not the raw load.
+        let instances = match &self.config.question_types {
+            Some(types) => instances
+                .into_iter()
+                .filter(|i| types.iter().any(|t| t == i.question_type.tag()))
+                .collect::<Vec<_>>(),
+            None => instances,
+        };
         let instances = match self.config.max_questions {
             Some(n) => instances.into_iter().take(n).collect::<Vec<_>>(),
             None => instances,
@@ -134,7 +167,11 @@ impl EvalRunner {
         };
         #[cfg(not(feature = "live-llm"))]
         let judge_type = "heuristic".to_string();
-        let meta = BenchmarkMeta::new(
+        // `meta` is only mutated under `live-llm` (to record judge
+        // heuristic-fallback counts); without the feature it stays
+        // immutable.
+        #[cfg_attr(not(feature = "live-llm"), allow(unused_mut))]
+        let mut meta = BenchmarkMeta::new(
             benchmark.id(),
             benchmark.display_name(),
             benchmark.url(),
@@ -196,6 +233,28 @@ impl EvalRunner {
             let (write_latency_ms, write_attempted, write_stored, write_deduplicated, ingest_err) =
                 ingest_sessions(&harness, first).await;
 
+            // ---- wait for async write-time extraction to drain ----
+            // Brain's extractors (entity / statement / relation) run
+            // asynchronously after ENCODE acks (extraction → statement
+            // embedding). Querying immediately would hit a half-built
+            // graph / empty embeddings, so we block until that whole
+            // async pipeline plateaus before reading — this is the
+            // correct default for measurement. Set BRAIN_EVAL_NO_DRAIN
+            // to a truthy value (1/true/yes/on) to opt out and read
+            // against the live, still-settling graph.
+            if !env_truthy("BRAIN_EVAL_NO_DRAIN") {
+                let admin_port = std::env::var("BRAIN_EVAL_DRAIN_ADMIN_PORT")
+                    .ok()
+                    .and_then(|p| p.parse::<u16>().ok())
+                    .unwrap_or(9091);
+                let url = format!(
+                    "http://{}:{}/metrics",
+                    self.config.endpoint.ip(),
+                    admin_port
+                );
+                wait_for_write_flush(&url, conv_key).await;
+            }
+
             // ---- per-question retrieval + judging ----
             for &idx in idxs {
                 let inst = &instances[idx];
@@ -218,6 +277,14 @@ impl EvalRunner {
             if let Err(e) = harness.close().await {
                 warn!(error = %e, "harness close failed; continuing");
             }
+        }
+
+        // Record how many questions the LLM judge graded with its heuristic
+        // fallback, so a run where the judge died partway can never look
+        // fully LLM-judged in the saved report.
+        #[cfg(feature = "live-llm")]
+        if let Some(judge) = &self.llm_judge {
+            meta.judge_heuristic_fallbacks = judge.heuristic_fallback_count();
         }
 
         let metrics = compute_full_metrics(&question_results);
@@ -243,28 +310,45 @@ impl EvalRunner {
         ingestion_failed: bool,
     ) -> QuestionResult {
         let recall = harness
-            .recall(&instance.question, self.config.top_k_retrieve)
+            .recall(&instance.question, self.config.max_results)
             .await;
-        let (hits, read_latency_ms, retrieval_failed) = match recall {
-            Ok(o) => (o.hits, o.latency_ms, false),
+
+        let (
+            answer_kind,
+            retrieved_memory_contents,
+            read_latency_ms,
+            retrieval_failed,
+            system_answer,
+        ) = match recall {
+            Ok(outcome) => {
+                let answer_kind = answer_kind_tag(outcome.answer_kind).to_owned();
+                let retrieved: Vec<String> =
+                    outcome.memories.iter().map(|m| m.text.clone()).collect();
+                let latency = outcome.latency_ms;
+                let answer = self.synth_answer(instance, &outcome).await;
+                (answer_kind, retrieved, latency, false, answer)
+            }
             Err(e) => {
                 warn!(
                     question_id = %instance.question_id,
                     error = %e,
                     "recall failed; recording as retrieval_failed",
                 );
-                (Vec::new(), 0, true)
+                ("error".to_owned(), Vec::new(), 0, true, String::new())
             }
         };
 
-        let retrieved_memory_contents: Vec<String> = hits.iter().map(|m| m.text.clone()).collect();
-        let memories_retrieved = hits.len();
-
-        #[allow(clippy::cast_possible_truncation)]
-        let cap = self.config.top_k_retrieve as usize;
-        let system_answer = self.synth_answer(instance, &hits, cap.max(1)).await;
-
+        let memories_retrieved = retrieved_memory_contents.len();
         let judged = self.judge_answer(instance, &system_answer).await;
+        // Grade retrieval independently of synthesis: did Brain surface the
+        // memory that supports the gold answer? Skip on a retrieval error
+        // (nothing meaningful to grade).
+        let (context_supported, context_support_reasoning) = if retrieval_failed {
+            (None, String::new())
+        } else {
+            self.judge_support(instance, &retrieved_memory_contents)
+                .await
+        };
 
         QuestionResult {
             question_id: instance.question_id.clone(),
@@ -272,6 +356,7 @@ impl EvalRunner {
             question: instance.question.clone(),
             ground_truth: instance.answer.clone(),
             system_answer,
+            answer_kind,
             verdict: judged.verdict,
             score: judged.score,
             write_latency_ms,
@@ -281,6 +366,8 @@ impl EvalRunner {
             memories_retrieved,
             retrieved_memory_contents,
             judge_reasoning: judged.reasoning,
+            context_supported,
+            context_support_reasoning,
             ingestion_failed,
             retrieval_failed,
             write_attempted,
@@ -362,10 +449,11 @@ impl IncrementalTracker {
             ""
         };
         println!(
-            "[{:>4}/{}] {:<9} acc={:.3} q={}{}",
+            "[{:>4}/{}] {:<9} {:<10} acc={:.3} q={}{}",
             self.done,
             self.total,
             format!("{:?}", result.verdict),
+            result.answer_kind,
             running_acc,
             result.question_id,
             flag,
@@ -436,6 +524,7 @@ fn failed_question_result(
         question: inst.question.clone(),
         ground_truth: inst.answer.clone(),
         system_answer: String::new(),
+        answer_kind: "error".to_owned(),
         verdict: Verdict::Incorrect,
         score: 0.0,
         write_latency_ms: 0,
@@ -445,10 +534,110 @@ fn failed_question_result(
         memories_retrieved: 0,
         retrieved_memory_contents: Vec::new(),
         judge_reasoning: reason,
+        context_supported: None,
+        context_support_reasoning: String::new(),
         ingestion_failed: ingest_failed,
         retrieval_failed: !ingest_failed,
         write_attempted: 0,
         write_stored: 0,
         write_deduplicated: 0,
     }
+}
+
+/// Stable tag for the router's answer shape, used in per-question
+/// records and the answer-shape metrics breakdown.
+fn answer_kind_tag(kind: AnswerKindWire) -> &'static str {
+    match kind {
+        AnswerKindWire::Single => "single",
+        AnswerKindWire::Many => "many",
+        AnswerKindWire::None => "none",
+    }
+}
+
+/// Parse an environment variable as a boolean flag. Unset, empty, or any
+/// non-affirmative value is `false`; `1`/`true`/`yes`/`on` (case-insensitive)
+/// are `true`. Used for opt-out toggles where presence alone must NOT flip
+/// the flag — `FLAG=0` and `FLAG=false` keep the default behaviour.
+fn env_truthy(var: &str) -> bool {
+    std::env::var(var)
+        .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false)
+}
+
+/// Block until the server's async write pipeline has fully flushed, so a
+/// conversation's entity / statement / relation graph — and its
+/// embeddings — are reflected in the read indexes before we query it.
+///
+/// A write is two-phase: the synchronous memory record (WAL-acked at
+/// ENCODE) and the asynchronous tail (extraction of entities /
+/// statements / relations, then statement embedding). Grounded recall
+/// depends on that async tail, so reads must not fire until it settles.
+/// We poll the COMBINED progress of both async stages —
+/// `brain_extractor_items_written_total` + `brain_statement_embed_rows_embedded_total`
+/// — and treat a plateau (no increase across a stable window, after at
+/// least one write has landed) as flushed. Watching only extraction
+/// would fire reads while statement embeddings are still being computed.
+/// Best-effort: failed polls keep retrying; the cap just proceeds.
+async fn wait_for_write_flush(metrics_url: &str, conv: &str) {
+    use std::time::Duration;
+    const INTERVAL: Duration = Duration::from_secs(5);
+    const STABLE_NEEDED: u32 = 12; // 60s plateau — tolerates slow LLM batches
+    const MIN_POLLS: u32 = 6; // ≥30s floor so the workers have started
+    const MAX_POLLS: u32 = 360; // 30 min hard cap
+
+    let client = reqwest::Client::new();
+    let mut last: i64 = -1;
+    let mut stable: u32 = 0;
+    for i in 0..MAX_POLLS {
+        let extracted =
+            fetch_counter_sum(&client, metrics_url, "brain_extractor_items_written_total").await;
+        let embedded = fetch_counter_sum(
+            &client,
+            metrics_url,
+            "brain_statement_embed_rows_embedded_total",
+        )
+        .await;
+        // Only advance the plateau logic when the endpoint answered for
+        // both families; a transient scrape failure shouldn't reset it.
+        if let (Some(ex), Some(em)) = (extracted, embedded) {
+            let cur = ex + em;
+            if cur == last {
+                stable += 1;
+            } else {
+                stable = 0;
+                last = cur;
+            }
+            // Require some async work to have actually landed (`cur > 0`)
+            // before honoring a plateau, so we don't mistake "workers
+            // haven't picked up yet" for "flushed".
+            if i + 1 >= MIN_POLLS && cur > 0 && stable >= STABLE_NEEDED {
+                tracing::info!(
+                    conversation = %conv,
+                    extracted = ex,
+                    statement_rows_embedded = em,
+                    "async write pipeline flushed"
+                );
+                return;
+            }
+        }
+        tokio::time::sleep(INTERVAL).await;
+    }
+    warn!(conversation = %conv, "write-flush wait hit max; proceeding");
+}
+
+/// Sum every sample of a Prometheus counter family in a `/metrics` body.
+/// Returns `Some(0)` when the metric is absent (nothing extracted yet),
+/// `None` only when the endpoint is unreachable.
+async fn fetch_counter_sum(client: &reqwest::Client, url: &str, metric: &str) -> Option<i64> {
+    let body = client.get(url).send().await.ok()?.text().await.ok()?;
+    let mut sum = 0i64;
+    for line in body.lines() {
+        if line.starts_with('#') || !line.starts_with(metric) {
+            continue;
+        }
+        if let Some(v) = line.rsplit(' ').next().and_then(|v| v.trim().parse::<f64>().ok()) {
+            sum += v as i64;
+        }
+    }
+    Some(sum)
 }

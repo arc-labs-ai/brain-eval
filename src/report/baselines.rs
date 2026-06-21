@@ -20,6 +20,29 @@ pub fn smoke_competitor_baselines() -> Vec<CompetitorRow> {
     Vec::new()
 }
 
+/// The lexical-stress set is Brain's own adversarial fixture — there
+/// are no published competitor numbers. Its value is internal: the gap
+/// between substring recall@k (≈0 by construction) and context-recall.
+#[must_use]
+pub fn lexical_stress_competitor_baselines() -> Vec<CompetitorRow> {
+    Vec::new()
+}
+
+/// The paraphrase-stress set is Brain's own generated adversarial fixture
+/// — there are no published competitor numbers. Its value is internal:
+/// the gap between substring recall@k (≈0) and context-recall at scale.
+#[must_use]
+pub fn paraphrase_stress_competitor_baselines() -> Vec<CompetitorRow> {
+    Vec::new()
+}
+
+/// The supersession-stress set is Brain's own generated fixture probing
+/// knowledge-update direction — there are no published competitor numbers.
+#[must_use]
+pub fn supersession_stress_competitor_baselines() -> Vec<CompetitorRow> {
+    Vec::new()
+}
+
 /// Empty placeholder — fill in as DMR numbers from competitors are
 /// collected. (The original MemGPT paper reported DMR; that's the
 /// natural first row to add.)

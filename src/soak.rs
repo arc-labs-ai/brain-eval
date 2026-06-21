@@ -240,7 +240,7 @@ pub async fn run_soak(endpoint: SocketAddr, cfg: &SoakConfig) -> Result<SoakRepo
         for _ in 0..cfg.batch {
             let text = format!("soak {salt} item {seq}: steady-state workload note");
             seq += 1;
-            let enc = EncodeBuilder::new(text.as_str()).deduplicate(false).build();
+            let enc = EncodeBuilder::new(text.as_str()).build();
             let t = Instant::now();
             match harness.client().encode(&enc).await {
                 Ok(_) => {
@@ -251,7 +251,7 @@ pub async fn run_soak(endpoint: SocketAddr, cfg: &SoakConfig) -> Result<SoakRepo
             }
             let cue = format!("soak {salt} item {}", seq.saturating_sub(1));
             let rec = RecallBuilder::new(cue.as_str())
-                .top_k(cfg.top_k)
+                .max_results(cfg.top_k)
                 .include_text(false)
                 .build();
             let t = Instant::now();
@@ -316,7 +316,7 @@ async fn drift_probe(harness: &BrainEvalHarness, salt: &str, top_k: u32) -> f64 
             "Drift reference {i} for topic {}: the unique marker is {needle}, set amid ordinary prose so retrieval must discriminate.",
             DRIFT_TOPICS[i % DRIFT_TOPICS.len()]
         );
-        let enc = EncodeBuilder::new(text.as_str()).deduplicate(false).build();
+        let enc = EncodeBuilder::new(text.as_str()).build();
         if harness.client().encode(&enc).await.is_err() {
             return 0.0;
         }
@@ -325,11 +325,11 @@ async fn drift_probe(harness: &BrainEvalHarness, salt: &str, top_k: u32) -> f64 
     for i in 0..PROBE {
         let needle = format!("zd{tag}{i:04}xz");
         let req = RecallBuilder::new(needle.as_str())
-            .top_k(top_k)
+            .max_results(top_k)
             .include_text(true)
             .build();
-        if let Ok(hits) = harness.client().recall(&req).await {
-            if hits.first().is_some_and(|m| m.text.contains(&needle)) {
+        if let Ok(answer) = harness.client().recall(&req).await {
+            if answer.memories.first().is_some_and(|m| m.text.contains(&needle)) {
                 hit_at_1 += 1;
             }
         }

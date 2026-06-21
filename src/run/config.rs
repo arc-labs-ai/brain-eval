@@ -21,17 +21,24 @@ pub struct RunConfig {
     pub endpoint: SocketAddr,
     /// Cap question count (smoke runs). `None` = run all.
     pub max_questions: Option<usize>,
-    /// `top_k` passed to every RECALL. Generous on purpose: long-corpus
-    /// benchmarks (LoCoMo ≈ 588 turns/conversation) need a wide candidate
-    /// set for the cross-encoder to rerank — pulling only the top few
-    /// strands the answer-bearing memory below the cutoff. Measured on
-    /// LoCoMo: top-10 → 0.42 accuracy, top-50 → 0.75. Override with
-    /// `BRAIN_EVAL_TOP_K`.
-    pub top_k_retrieve: u32,
+    /// Safety cap on returned set members / episodic hits per RECALL —
+    /// NOT a ranking knob. The answer's shape comes from the stored data
+    /// (one value, a set, or honest "don't know"); this only bounds how
+    /// many episodic snippets the synthesizer sees on the fallback path.
+    /// Generous on purpose: long-corpus benchmarks (LoCoMo ≈ 588
+    /// turns/conversation) need a wide episodic set for the synthesizer.
+    /// Measured on LoCoMo: cap-10 → 0.42 accuracy, cap-50 → 0.75.
+    /// Override with `BRAIN_EVAL_TOP_K`.
+    pub max_results: u32,
     /// Where to write report files.
     pub output_dir: PathBuf,
     /// Reporters to activate.
     pub reporters: Vec<ReporterKind>,
+    /// Restrict the run to these question-type tags (e.g. `single_hop`).
+    /// `None` runs every type. Lets a run isolate one dimension — e.g.
+    /// single-fact retrieval, where the answer is one item and "is it in
+    /// the retrieved list at all" is a clean signal.
+    pub question_types: Option<Vec<String>>,
 }
 
 impl RunConfig {
@@ -41,9 +48,10 @@ impl RunConfig {
         Self {
             endpoint,
             max_questions: None,
-            top_k_retrieve: 50,
+            max_results: 50,
             output_dir: PathBuf::from("target/eval-reports"),
             reporters: vec![ReporterKind::Json, ReporterKind::Text],
+            question_types: None,
         }
     }
 
@@ -66,10 +74,10 @@ impl RunConfig {
             .ok()
             .and_then(|v| v.parse::<usize>().ok());
 
-        let top_k_retrieve = std::env::var("BRAIN_EVAL_TOP_K")
+        let max_results = std::env::var("BRAIN_EVAL_TOP_K")
             .ok()
             .and_then(|v| v.parse::<u32>().ok())
-            .unwrap_or(10);
+            .unwrap_or(50);
 
         let output_dir = std::env::var("BRAIN_EVAL_OUTPUT_DIR")
             .unwrap_or_else(|_| "target/eval-reports".to_owned());
@@ -90,12 +98,23 @@ impl RunConfig {
             reporters
         };
 
+        let question_types = std::env::var("BRAIN_EVAL_QUESTION_TYPES")
+            .ok()
+            .map(|s| {
+                s.split(',')
+                    .map(|t| t.trim().to_ascii_lowercase())
+                    .filter(|t| !t.is_empty())
+                    .collect::<Vec<_>>()
+            })
+            .filter(|v| !v.is_empty());
+
         Ok(Self {
             endpoint,
             max_questions,
-            top_k_retrieve,
+            max_results,
             output_dir: PathBuf::from(output_dir),
             reporters,
+            question_types,
         })
     }
 

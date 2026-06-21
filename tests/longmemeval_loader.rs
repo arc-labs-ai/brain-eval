@@ -71,8 +71,10 @@ fn sessions_and_turns_survive_round_trip() {
         .find(|i| i.question_id == "smoke-003")
         .expect("smoke-003 present");
     assert_eq!(multi.sessions.len(), 2);
-    assert_eq!(multi.sessions[0].session_id, "s-3a");
-    assert_eq!(multi.sessions[1].session_id, "s-3b");
+    // The real LongMemEval release ships sessions as bare turn lists with
+    // no inline ids, so the loader assigns positional ids.
+    assert_eq!(multi.sessions[0].session_id, "session-0");
+    assert_eq!(multi.sessions[1].session_id, "session-1");
 
     let first_turn = &multi.sessions[1].turns[0];
     assert_eq!(first_turn.role, "user");

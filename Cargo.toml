@@ -9,12 +9,12 @@ description = "Evaluation, benchmarking, and report generation for Brain — the
 
 [features]
 default = []
-# Enables LLM-as-judge evaluation. Off by default — real LLM calls
-# cost money and require live API keys. Build/run with `--features
+# Enables LLM-as-judge + LLM answer synthesis. Off by default — real LLM
+# calls cost money and require live API keys. Build/run with `--features
 # live-llm` and an `ANTHROPIC_API_KEY` (or `OPENAI_API_KEY`) to opt in;
 # the runner falls back to the heuristic judge when the feature is off or
-# no key is set. Pulls in `reqwest` (the only HTTP dependency, gated here).
-live-llm = ["dep:reqwest"]
+# no key is set.
+live-llm = []
 
 # ----------------------------------------------------------------------------
 # Dependency on the SDK — and ONLY the SDK.
@@ -43,12 +43,20 @@ uuid = { version = "1.7", features = ["v7", "serde"] }
 thiserror = "1"
 tracing = "0.1"
 
-# LLM-as-judge HTTP client. Optional — only compiled under `live-llm`.
-# rustls (no system OpenSSL); `json` for request/response bodies.
+# Pins the judge prompt into the report: BenchmarkMeta records the
+# sha256 of the rendered judge template so a silent prompt edit can't
+# masquerade as the same eval. Unconditional (the meta block is not
+# behind live-llm) and tiny.
+sha2 = "0.10"
+
+# HTTP client. Core dependency: the runner uses it for the admin
+# `/metrics` extraction-drain barrier (independent of LLM), and the
+# `live-llm` judge / synthesizer reuse it. rustls (no system OpenSSL);
+# `json` for request/response bodies.
 reqwest = { version = "0.12", default-features = false, features = [
     "rustls-tls",
     "json",
-], optional = true }
+] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "test-util"] }

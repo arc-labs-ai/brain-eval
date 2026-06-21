@@ -78,7 +78,7 @@ async fn run(
             .map_err(|e| format!("connect: {e}"))?;
         for i in 0..n {
             let text = format!("footprint item {i}: a durable memory carrying ordinary prose");
-            let req = EncodeBuilder::new(text.as_str()).deduplicate(false).build();
+            let req = EncodeBuilder::new(text.as_str()).build();
             if let Err(e) = h.client().encode(&req).await {
                 let _ = h.close().await;
                 server.stop().await;

@@ -441,7 +441,7 @@ async fn prepare(
                 let text = format!(
                     "Throughput corpus note {i}: the gateway team tuned warm caches and rate limits."
                 );
-                let req = EncodeBuilder::new(text.as_str()).deduplicate(false).build();
+                let req = EncodeBuilder::new(text.as_str()).build();
                 client.encode(&req).await?;
             }
             Ok(Prepared::Shared(WorkerPlan::Query))
@@ -539,7 +539,7 @@ async fn run_one(client: &BrainClient, plan: &WorkerPlan, seq: u64) -> Result<()
     match plan {
         WorkerPlan::Encode => {
             let text = format!("tput encode {} {seq}", short_hex(client.agent_id()));
-            let req = EncodeBuilder::new(text.as_str()).deduplicate(false).build();
+            let req = EncodeBuilder::new(text.as_str()).build();
             client.encode(&req).await?;
             Ok(())
         }
@@ -550,6 +550,7 @@ async fn run_one(client: &BrainClient, plan: &WorkerPlan, seq: u64) -> Result<()
                 kind_filter: Vec::new(),
                 predicate_filter: Vec::new(),
                 time_filter: None,
+                as_of_record_time_unix_nanos: None,
                 confidence_min: None,
                 include_tombstoned: false,
                 include_superseded: false,

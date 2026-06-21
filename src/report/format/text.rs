@@ -24,6 +24,21 @@ impl Reporter for TextReporter {
         )?;
         writeln!(f, "url         : {}", report.meta.benchmark_url)?;
         writeln!(f, "judge       : {}", report.meta.judge_type)?;
+        if report.meta.judge_heuristic_fallbacks > 0 {
+            writeln!(
+                f,
+                "  WARNING   : {} question(s) fell back to the HEURISTIC judge \
+                 (failed/unparseable LLM call) — accuracy is NOT fully LLM-judged",
+                report.meta.judge_heuristic_fallbacks,
+            )?;
+        }
+        writeln!(
+            f,
+            "judge prompt: {} (sha256 {}, temp {})",
+            report.meta.judge_prompt_version,
+            &report.meta.judge_prompt_sha256[..report.meta.judge_prompt_sha256.len().min(12)],
+            report.meta.judge_temperature,
+        )?;
         writeln!(f, "instances   : {}", report.meta.instance_count)?;
         writeln!(f, "brain       : {}", report.meta.brain_version)?;
         writeln!(f)?;
@@ -61,21 +76,39 @@ impl Reporter for TextReporter {
         )?;
         writeln!(f)?;
 
+        writeln!(f, "Retrieval quality")?;
+        // Headline: answer-supporting context recall (semantic, LLM-judged).
+        match &m.context_recall {
+            Some(c) => writeln!(
+                f,
+                "  Context recall (headline) : {:.4}  ({}/{} answer-supporting)",
+                c.supported_rate, c.n_supported, c.n_judged
+            )?,
+            None => writeln!(
+                f,
+                "  Context recall (headline) : n/a  (no LLM judge; run with --features live-llm)"
+            )?,
+        }
+        // Deprecated diagnostic: substring recall@k. Rewards lexical
+        // overlap (Kamalloo 2023 / NoLiMa); kept only to contrast.
         if let Some(r) = &m.retrieval {
-            writeln!(f, "Retrieval quality")?;
-            writeln!(f, "  Recall@1  : {:.4}", r.recall_at_1)?;
             writeln!(
                 f,
-                "  Recall@5  : {:.4}    Recall@10 : {:.4}",
+                "  Substring recall@k (DEPRECATED diagnostic — Kamalloo 2023 / NoLiMa):"
+            )?;
+            writeln!(f, "    Recall@1  : {:.4}", r.recall_at_1)?;
+            writeln!(
+                f,
+                "    Recall@5  : {:.4}    Recall@10 : {:.4}",
                 r.recall_at_5, r.recall_at_10
             )?;
             writeln!(
                 f,
-                "  NDCG@5    : {:.4}    NDCG@10   : {:.4}",
+                "    NDCG@5    : {:.4}    NDCG@10   : {:.4}",
                 r.ndcg_at_5, r.ndcg_at_10
             )?;
-            writeln!(f)?;
         }
+        writeln!(f)?;
 
         if !m.per_dimension.is_empty() {
             writeln!(f, "Per-dimension")?;

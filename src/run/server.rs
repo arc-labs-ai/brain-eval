@@ -185,6 +185,15 @@ impl ServerHandle {
             "BRAIN_RERANK_MODEL_DIR=/models/bge-reranker-base",
             "-e",
             "BRAIN_NER_MODEL_PATH=/models/gliner-small-v2.1",
+            // Write-time HyPE: the LLM generates hypothetical questions per
+            // memory, embedded into a pool the read path probes. Activates
+            // only when an LLM provider key is also forwarded below; without
+            // one the server logs an INFO skip, so this is safe to set
+            // unconditionally.
+            "-e",
+            "BRAIN_HYPE_ENABLED=true",
+            "-e",
+            "BRAIN_HYPE_NUM_QUESTIONS=6",
             "-e",
             &arena_env,
         ]);

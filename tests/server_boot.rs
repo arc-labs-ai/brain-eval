@@ -44,9 +44,8 @@ async fn start_docker_boots_a_usable_server() {
         .await
         .expect("connect to booted server");
 
-    let request = brain_db_sdk::EncodeBuilder::new("the sky over Lisbon turned amber at dusk")
-        .deduplicate(true)
-        .build();
+    let request =
+        brain_db_sdk::EncodeBuilder::new("the sky over Lisbon turned amber at dusk").build();
     harness
         .client()
         .encode(&request)
@@ -58,7 +57,7 @@ async fn start_docker_boots_a_usable_server() {
         .await
         .expect("recall against booted server");
     assert!(
-        !recall.hits.is_empty(),
+        !recall.memories.is_empty(),
         "expected the just-encoded memory to be recallable"
     );
 

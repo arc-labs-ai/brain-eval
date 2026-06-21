@@ -9,8 +9,9 @@ pub mod format;
 pub mod shape;
 
 pub use baselines::{
-    dmr_competitor_baselines, locomo_competitor_baselines, longmemeval_s_competitor_baselines,
-    smoke_competitor_baselines, CompetitorBaselines,
+    dmr_competitor_baselines, lexical_stress_competitor_baselines, locomo_competitor_baselines,
+    longmemeval_s_competitor_baselines, paraphrase_stress_competitor_baselines,
+    smoke_competitor_baselines, supersession_stress_competitor_baselines, CompetitorBaselines,
 };
 pub use format::Reporter;
 pub use shape::{BenchmarkMeta, BenchmarkReport, CompetitorRow};

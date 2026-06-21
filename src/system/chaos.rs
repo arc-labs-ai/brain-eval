@@ -25,7 +25,7 @@ use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use brain_db_sdk::wire::types::{EncodeRequest, MemoryKindWire};
+use brain_db_sdk::wire::types::EncodeRequest;
 use brain_db_sdk::{new_id, BrainClient, ClientConfig, RecallBuilder};
 
 use super::ScenarioOutcome;
@@ -186,10 +186,10 @@ async fn count_survivors(
         .map_err(|e| e.to_string())?;
     let k = (acked.len() * 2).clamp(10, 1000) as u32;
     let req = RecallBuilder::new(marker)
-        .top_k(k)
+        .max_results(k)
         .include_text(false)
         .build();
-    let hits = client.recall(&req).await.map_err(|e| e.to_string())?;
+    let hits = client.recall(&req).await.map_err(|e| e.to_string())?.memories;
     let ids: HashSet<u128> = hits.iter().map(|m| m.memory_id).collect();
     let survived = acked.iter().filter(|(id, _)| ids.contains(id)).count();
     let _ = client.close().await;
@@ -203,16 +203,13 @@ fn client_config(agent_id: [u8; 16]) -> ClientConfig {
     }
 }
 
-/// A non-dedup ENCODE (every call writes a real, durable row).
+/// An ENCODE with a fresh request id (every call writes a real row).
 fn encode_req(text: &str) -> EncodeRequest {
     EncodeRequest {
         text: text.to_string(),
         context_id: 0,
-        kind: MemoryKindWire::Semantic,
-        salience_hint: 0.5,
-        edges: Vec::new(),
         request_id: new_id(),
         txn_id: None,
-        deduplicate: false,
+        occurred_at_unix_nanos: None,
     }
 }

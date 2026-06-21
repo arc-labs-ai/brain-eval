@@ -224,9 +224,7 @@ pub async fn run_scale(
     // --- ingest -------------------------------------------------------
     let mut ingested = 0usize;
     for i in 0..cfg.ingest_n {
-        let req = EncodeBuilder::new(LoadGenerator::memory(i).as_str())
-            .deduplicate(false)
-            .build();
+        let req = EncodeBuilder::new(LoadGenerator::memory(i).as_str()).build();
         client.encode(&req).await?;
         ingested += 1;
     }
@@ -239,7 +237,7 @@ pub async fn run_scale(
             "probe encode {i}: {}",
             LoadGenerator::memory(cfg.ingest_n + i)
         );
-        let req = EncodeBuilder::new(text.as_str()).deduplicate(false).build();
+        let req = EncodeBuilder::new(text.as_str()).build();
         let start = Instant::now();
         client.encode(&req).await?;
         encode_ms.push(ms(start));
@@ -249,7 +247,7 @@ pub async fn run_scale(
     let mut recall_ms = Vec::with_capacity(cfg.probe_n);
     for i in 0..cfg.probe_n {
         let req = RecallBuilder::new(LoadGenerator::cue(i).as_str())
-            .top_k(cfg.top_k)
+            .max_results(cfg.top_k)
             .include_text(false)
             .build();
         let start = Instant::now();

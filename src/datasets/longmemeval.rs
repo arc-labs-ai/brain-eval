@@ -25,28 +25,32 @@
 //!
 //! ## Wire shape (per the LongMemEval release)
 //!
+//! Each haystack session is a BARE list of `{role, content}` turns — not a
+//! `{session_id, turns}` object. The session ids live in a parallel
+//! `haystack_session_ids` array, and the loader assigns sessions positional
+//! ids (`session-0`, `session-1`, …) since the eval only needs ordered
+//! turns.
+//!
 //! ```jsonc
 //! {
-//!   "question_id":   "abc-001",
-//!   "question_type": "multi-session",
-//!   "question":      "When did the user move to Berlin?",
-//!   "answer":        "March 2024",
+//!   "question_id":         "abc-001",
+//!   "question_type":       "multi-session",
+//!   "question":            "When did the user move to Berlin?",
+//!   "answer":              "March 2024",
+//!   "haystack_session_ids": ["s-1"],
 //!   "haystack_sessions": [
-//!     {
-//!       "session_id": "s-1",
-//!       "session_date": "2024-02-15",
-//!       "turns": [
-//!         {"role": "user",      "content": "I'm planning a move."},
-//!         {"role": "assistant", "content": "Where to?"}
-//!       ]
-//!     }
-//!   ],
-//!   "answer_session_ids": ["s-2"]
+//!     [
+//!       {"role": "user",      "content": "I'm planning a move."},
+//!       {"role": "assistant", "content": "Where to?"}
+//!     ]
+//!   ]
 //! }
 //! ```
 //!
-//! Fields the loader currently ignores (kept for future enrichment):
-//! `session_date`, `answer_session_ids`.
+//! Fields present in the release but intentionally not parsed:
+//! `haystack_session_ids` (sessions are indexed positionally) and
+//! `answer_session_ids` (the eval grades on the answer, not which session
+//! held it).
 
 use std::path::Path;
 
@@ -74,8 +78,20 @@ impl Benchmark for LongMemEvalS {
 
     fn load(&self, datasets_dir: &Path) -> Result<Vec<EvalInstance>, EvalError> {
         let path = datasets_dir.join("longmemeval").join("longmemeval_s.json");
-        let bytes = std::fs::read(&path).map_err(|_| EvalError::DatasetNotFound {
-            path: path.display().to_string(),
+        let bytes = std::fs::read(&path).map_err(|e| {
+            // Only a genuinely-absent file is "not found"; a permission or
+            // read error is a real IO failure and must not be misreported
+            // as a missing dataset — preserve the underlying cause.
+            if e.kind() == std::io::ErrorKind::NotFound {
+                EvalError::DatasetNotFound {
+                    path: path.display().to_string(),
+                }
+            } else {
+                EvalError::ParseError {
+                    path: path.display().to_string(),
+                    reason: format!("could not read dataset: {e}"),
+                }
+            }
         })?;
 
         // The release ships either a JSON array or one-object-per-line
@@ -127,22 +143,23 @@ struct LmeRow {
     #[serde(default = "default_qtype")]
     question_type: String,
     question: String,
+    // Some LongMemEval answers are bare JSON numbers (e.g. counts) rather
+    // than strings; coerce any scalar to its string form so one off-type
+    // row can't reject the whole 500-question array.
+    #[serde(deserialize_with = "de_flexible_string")]
     answer: String,
+    // The real LongMemEval release ships each haystack session as a BARE
+    // list of {role, content} turns (not a {session_id, turns} object);
+    // session ids live in the parallel `haystack_session_ids` array. We
+    // index sessions positionally — the eval only needs ordered turns.
     #[serde(default)]
-    haystack_sessions: Vec<LmeSession>,
-}
-
-#[derive(Debug, Deserialize)]
-struct LmeSession {
-    #[serde(default = "default_session_id")]
-    session_id: String,
-    #[serde(default)]
-    turns: Vec<LmeTurn>,
+    haystack_sessions: Vec<Vec<LmeTurn>>,
 }
 
 #[derive(Debug, Deserialize)]
 struct LmeTurn {
     role: String,
+    #[serde(default)]
     content: String,
 }
 
@@ -150,8 +167,18 @@ fn default_qtype() -> String {
     "single-session-user".to_owned()
 }
 
-fn default_session_id() -> String {
-    "session-0".to_owned()
+/// Deserialize a field that may arrive as a JSON string OR a bare scalar
+/// (number / bool) into a `String`. LongMemEval mixes both for `answer`.
+fn de_flexible_string<'de, D>(d: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize;
+    Ok(match serde_json::Value::deserialize(d)? {
+        serde_json::Value::String(s) => s,
+        serde_json::Value::Null => String::new(),
+        other => other.to_string(),
+    })
 }
 
 impl LmeRow {
@@ -169,10 +196,10 @@ impl LmeRow {
             sessions: self
                 .haystack_sessions
                 .into_iter()
-                .map(|s| Session {
-                    session_id: s.session_id,
-                    turns: s
-                        .turns
+                .enumerate()
+                .map(|(i, turns)| Session {
+                    session_id: format!("session-{i}"),
+                    turns: turns
                         .into_iter()
                         .map(|t| TurnRecord {
                             role: t.role,
@@ -211,14 +238,12 @@ mod tests {
             "question_type": "multi-session",
             "question": "When did the user move to Berlin?",
             "answer": "March 2024",
+            "haystack_session_ids": ["s-1"],
             "haystack_sessions": [
-                {
-                    "session_id": "s-1",
-                    "turns": [
-                        {"role": "user", "content": "I'm planning a move."},
-                        {"role": "assistant", "content": "Where to?"}
-                    ]
-                }
+                [
+                    {"role": "user", "content": "I'm planning a move."},
+                    {"role": "assistant", "content": "Where to?"}
+                ]
             ]
         }"#
     }

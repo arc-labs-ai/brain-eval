@@ -112,6 +112,7 @@ async fn run(endpoint: SocketAddr) -> Result<ScenarioOutcome, HarnessError> {
             kind_filter: Vec::new(),
             predicate_filter: Vec::new(),
             time_filter: None,
+            as_of_record_time_unix_nanos: None,
             confidence_min: None,
             include_tombstoned: false,
             include_superseded: false,
@@ -164,9 +165,7 @@ async fn run(endpoint: SocketAddr) -> Result<ScenarioOutcome, HarnessError> {
     let mem_id = h
         .client()
         .encode(
-            &EncodeBuilder::new(mem_text.as_str())
-                .deduplicate(false)
-                .build(),
+            &EncodeBuilder::new(mem_text.as_str()).build(),
         )
         .await?
         .memory_id;
@@ -183,6 +182,7 @@ async fn run(endpoint: SocketAddr) -> Result<ScenarioOutcome, HarnessError> {
                 kind_filter: Vec::new(),
                 predicate_filter: Vec::new(),
                 time_filter: None,
+                as_of_record_time_unix_nanos: None,
                 confidence_min: None,
                 include_tombstoned: false,
                 include_superseded: false,

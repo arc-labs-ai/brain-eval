@@ -34,3 +34,7 @@ Thumbs.db
 
 # Local scratch
 /scratch/
+# Machine-specific scratch analysis script at the repo root.
+/analyze_reads.py
+# Incremental per-run JSONL sidecars (also covered by /target/eval-reports/).
+/target/eval-reports/*.jsonl

@@ -9,6 +9,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 
 use crate::core::outcome::QuestionResult;
+use crate::score::judge_prompt::{judge_prompt_sha256, JUDGE_PROMPT_VERSION, JUDGE_TEMPERATURE};
 use crate::score::metrics::EvalMetrics;
 
 /// Full report — metadata + metrics + competitor table + per-question
@@ -54,8 +55,26 @@ pub struct BenchmarkMeta {
     pub benchmark_name: String,
     /// Paper / dataset URL.
     pub benchmark_url: String,
-    /// `"heuristic"` or `"llm"`.
+    /// `"heuristic"` or `"llm:<provider>:<model>@<prompt-version>"`.
     pub judge_type: String,
+    /// The judge model that actually graded the run (e.g.
+    /// `"anthropic:claude-haiku-4-5"`), or `"heuristic"` on a heuristic
+    /// run. Pulled out of `judge_type` so dashboards don't have to parse.
+    pub judge_model: String,
+    /// Judge prompt version — bumped on any wording change.
+    pub judge_prompt_version: String,
+    /// Hex sha256 of the rendered judge templates. Recorded so a silent
+    /// prompt edit (even one that forgets to bump the version) is
+    /// detectable by hash mismatch across runs.
+    pub judge_prompt_sha256: String,
+    /// Judge sampling temperature (0 = deterministic). Recorded so a run
+    /// can't quietly turn up sampling and claim the same methodology.
+    pub judge_temperature: f64,
+    /// How many questions the LLM judge silently graded with the heuristic
+    /// fallback (failed call / unparseable reply). Non-zero means the run
+    /// is NOT fully LLM-judged even when `judge_type` says `llm:...`.
+    #[serde(default)]
+    pub judge_heuristic_fallbacks: usize,
     /// Run start time, as Unix nanos. Reports format this for humans.
     pub run_started_unix_nanos: u128,
     /// How many instances were loaded.
@@ -79,11 +98,24 @@ impl BenchmarkMeta {
         let run_started_unix_nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_or(0, |d| d.as_nanos());
+        // `judge_type` is `"heuristic"` or `"llm:<provider>:<model>@<ver>"`.
+        // The model is the middle: strip the `llm:` prefix and the
+        // `@<ver>` suffix; a heuristic run reports `"heuristic"`.
+        let judge_model = judge_type
+            .strip_prefix("llm:")
+            .map_or_else(|| judge_type.to_owned(), |rest| {
+                rest.split('@').next().unwrap_or(rest).to_owned()
+            });
         Self {
             benchmark_id: benchmark_id.to_owned(),
             benchmark_name: benchmark_name.to_owned(),
             benchmark_url: benchmark_url.to_owned(),
             judge_type: judge_type.to_owned(),
+            judge_model,
+            judge_prompt_version: JUDGE_PROMPT_VERSION.to_owned(),
+            judge_prompt_sha256: judge_prompt_sha256(),
+            judge_temperature: JUDGE_TEMPERATURE,
+            judge_heuristic_fallbacks: 0,
             run_started_unix_nanos,
             instance_count,
             brain_version: env!("CARGO_PKG_VERSION").to_owned(),
