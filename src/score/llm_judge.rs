@@ -22,7 +22,7 @@ use crate::core::outcome::{JudgeResult, Verdict};
 use crate::llm::{truncate, LlmClient};
 use crate::score::judge::judge_answer_heuristic;
 use crate::score::judge_prompt::{
-    JUDGE_PROMPT_VERSION, SUPPORT_PROMPT_TEMPLATE, VERDICT_PROMPT_TEMPLATE,
+    verdict_type_guidance, JUDGE_PROMPT_VERSION, SUPPORT_PROMPT_TEMPLATE, VERDICT_PROMPT_TEMPLATE,
 };
 
 /// Token budget for the verdict JSON. Generous so a verbose `reasoning`
@@ -73,7 +73,7 @@ impl LlmJudge {
         ground_truth: &str,
         system_answer: &str,
     ) -> JudgeResult {
-        let prompt = render_verdict_prompt(question, ground_truth, system_answer);
+        let prompt = render_verdict_prompt(qtype, question, ground_truth, system_answer);
         match self.client.complete(&prompt, MAX_TOKENS).await {
             Ok(reply) => parse_verdict(question_id, &reply).unwrap_or_else(|| {
                 self.heuristic_fallbacks.fetch_add(1, Ordering::Relaxed);
@@ -152,8 +152,14 @@ impl LlmJudge {
 /// Render the pinned verdict template with this question's data. Kept as
 /// plain replacement (not `format!`) so the hashed template in
 /// [`crate::score::judge_prompt`] is the single source of the wording.
-fn render_verdict_prompt(question: &str, ground_truth: &str, system_answer: &str) -> String {
+fn render_verdict_prompt(
+    qtype: QuestionType,
+    question: &str,
+    ground_truth: &str,
+    system_answer: &str,
+) -> String {
     VERDICT_PROMPT_TEMPLATE
+        .replace("{type_guidance}", verdict_type_guidance(qtype))
         .replace("{question}", question)
         .replace("{ground_truth}", ground_truth)
         .replace("{system_answer}", system_answer)
@@ -307,10 +313,17 @@ mod tests {
 
     #[test]
     fn verdict_template_renders_without_leftover_braces() {
-        let p = render_verdict_prompt("Q?", "A", "B");
+        let p = render_verdict_prompt(QuestionType::Temporal, "Q?", "A", "B");
         assert!(p.contains("Question: Q?"));
         assert!(!p.contains("{{"));
         assert!(!p.contains("{question}"));
+        assert!(!p.contains("{type_guidance}"));
+        // Temporal guidance is spliced in.
+        assert!(p.contains("off-by-one"));
+        // A default type leaves no guidance block behind.
+        let plain = render_verdict_prompt(QuestionType::SingleHop, "Q?", "A", "B");
+        assert!(!plain.contains("{type_guidance}"));
+        assert!(!plain.contains("Type-specific"));
     }
 
     #[test]

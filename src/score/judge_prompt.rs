@@ -15,9 +15,14 @@
 
 use sha2::{Digest, Sha256};
 
+use crate::core::instance::QuestionType;
+
 /// Bumped whenever a judge prompt's wording changes. Reports carry it so
-/// a methodology change is never silent.
-pub const JUDGE_PROMPT_VERSION: &str = "v1";
+/// a methodology change is never silent. v2 adds per-question-type grading
+/// guidance (temporal off-by-one, knowledge-update latest-value,
+/// preference, multi-hop, unanswerable) — matching LongMemEval's official
+/// per-type judging instead of one generic rubric.
+pub const JUDGE_PROMPT_VERSION: &str = "v2";
 
 /// Grading temperature recorded in the report for transparency. This value
 /// is advisory: the judge does not thread it through to the API — the
@@ -38,8 +43,49 @@ facts (a paraphrase or extra detail is fine). Grade \"partial\" if it is \
 only partially right or omits a key detail. Grade \"incorrect\" if it is \
 wrong, irrelevant, or empty. If the reference answer indicates the question \
 is unanswerable, grade \"correct\" only when the system declined to answer.\n\n\
+{type_guidance}\
 Respond with ONLY a JSON object, no prose:\n\
 {{\"verdict\": \"correct\" | \"partial\" | \"incorrect\", \"reasoning\": \"<one short sentence>\"}}";
+
+/// Per-question-type grading guidance spliced into the verdict prompt at
+/// `{type_guidance}`. A generic rubric under-credits answers that are
+/// correct under the type's own rules — a temporal answer off by a day, a
+/// knowledge-update answer that gives the latest value, a preference
+/// paraphrase. Returns `""` for types that need no special handling
+/// (single-hop / other) so the prompt is unchanged there. Mirrors
+/// LongMemEval's per-type judge instructions.
+#[must_use]
+pub fn verdict_type_guidance(qtype: QuestionType) -> &'static str {
+    match qtype {
+        QuestionType::Temporal => {
+            "Type-specific guidance (temporal): do not penalize an off-by-one day; accept an answer \
+             that names the correct date, month, or period even if phrased differently (e.g. a \
+             relative expression resolved to the right month). A date within a day of the reference \
+             is correct.\n\n"
+        }
+        QuestionType::KnowledgeUpdate => {
+            "Type-specific guidance (knowledge update): the reference is the LATEST value after an \
+             update. Grade correct only if the system gives the updated value; repeating an \
+             outdated earlier value is incorrect.\n\n"
+        }
+        QuestionType::Preference => {
+            "Type-specific guidance (preference): grade correct if the system captures the user's \
+             stated preference (the liked / disliked / favorite thing); reasonable phrasing \
+             variants are fine.\n\n"
+        }
+        QuestionType::MultiHop => {
+            "Type-specific guidance (multi-hop): the answer must combine facts across memories; an \
+             answer that states the final synthesized fact is correct even if it omits the \
+             intermediate steps.\n\n"
+        }
+        QuestionType::Abstention | QuestionType::Adversarial => {
+            "Type-specific guidance (unanswerable): this question cannot be answered from the \
+             stored memories. Grade correct ONLY if the system declined or said it does not know; \
+             any substantive answer is incorrect.\n\n"
+        }
+        QuestionType::SingleHop | QuestionType::Other => "",
+    }
+}
 
 /// Support prompt: does the retrieved context actually contain the gold
 /// answer? This is the answer-supporting-context-recall judge — it grades
@@ -95,7 +141,22 @@ mod tests {
     fn templates_keep_their_placeholders() {
         assert!(VERDICT_PROMPT_TEMPLATE.contains("{question}"));
         assert!(VERDICT_PROMPT_TEMPLATE.contains("{system_answer}"));
+        assert!(VERDICT_PROMPT_TEMPLATE.contains("{type_guidance}"));
         assert!(SUPPORT_PROMPT_TEMPLATE.contains("{retrieved}"));
         assert!(SUPPORT_PROMPT_TEMPLATE.contains("{ground_truth}"));
+    }
+
+    #[test]
+    fn type_guidance_is_specific_or_empty() {
+        // Types with their own grading rules get guidance...
+        assert!(verdict_type_guidance(QuestionType::Temporal).contains("off-by-one"));
+        assert!(verdict_type_guidance(QuestionType::KnowledgeUpdate).contains("LATEST"));
+        assert!(verdict_type_guidance(QuestionType::Preference).contains("preference"));
+        assert!(verdict_type_guidance(QuestionType::MultiHop).contains("multi-hop"));
+        assert!(verdict_type_guidance(QuestionType::Abstention).contains("unanswerable"));
+        assert!(verdict_type_guidance(QuestionType::Adversarial).contains("unanswerable"));
+        // ...the default types leave the prompt untouched.
+        assert_eq!(verdict_type_guidance(QuestionType::SingleHop), "");
+        assert_eq!(verdict_type_guidance(QuestionType::Other), "");
     }
 }
