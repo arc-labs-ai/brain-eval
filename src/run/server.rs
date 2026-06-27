@@ -15,10 +15,11 @@
 //! all provisioned by brain-db's `.devcontainer/bootstrap-model.sh`) and
 //! leaves every tier enabled — rerank and classifier load from those models,
 //! so the acceptance suite exercises the real read + extraction paths rather
-//! than a degraded server. The LLM tier is the one external dependency: it
-//! needs an API key (forwarded from `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` in
-//! the eval's environment) and degrades to a no-op without one, so it never
-//! blocks the shard from spawning.
+//! than a degraded server. The LLM is the one external dependency, and a
+//! hard one: write-time HyPE is mandatory, so the server refuses to boot
+//! without a provider key. The eval forwards the single shared credential
+//! `BRAIN__LLM__API_KEY` from its own environment into the container
+//! (provider derived from `BRAIN__LLM__MODEL`).
 
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -138,20 +139,29 @@ impl ServerHandle {
             .data_volume
             .as_ref()
             .map(|v| format!("{v}:/var/lib/brain/data"));
-        // Forward an LLM provider key if the eval's environment has one. The
-        // LLM extractor tier degrades to a no-op without it (it never blocks
-        // boot), so this just lets statement/relation extraction activate when
-        // a key is available.
-        let llm_key_env: Option<String> = std::env::var("OPENAI_API_KEY")
+        // Forward the single shared LLM credential into the container. Brain
+        // requires it: write-time HyPE is mandatory, so the server refuses to
+        // boot without a provider key. The provider is derived from the model
+        // id, so this one var (`BRAIN__LLM__API_KEY`) covers OpenAI or
+        // Anthropic — set `BRAIN__LLM__MODEL` to pick.
+        let llm_key_env: Option<String> = std::env::var("BRAIN__LLM__API_KEY")
             .ok()
             .filter(|v| !v.is_empty())
-            .map(|v| format!("OPENAI_API_KEY={v}"))
-            .or_else(|| {
-                std::env::var("ANTHROPIC_API_KEY")
-                    .ok()
-                    .filter(|v| !v.is_empty())
-                    .map(|v| format!("ANTHROPIC_API_KEY={v}"))
-            });
+            .map(|v| format!("BRAIN__LLM__API_KEY={v}"));
+        // Scope every eval write to a real namespace. The server derives the
+        // tenant from auth: a permissive connection with no configured default
+        // namespace resolves to the reserved `brain` system namespace, which
+        // rejects user writes under the server's fail-closed tenancy mode. We
+        // boot the container with a permissive default namespace so the whole
+        // run lands in one real tenant. Defaults to `eval`; override via the
+        // eval process env.
+        let namespace_env = format!(
+            "BRAIN__AUTH__DEFAULT_NAMESPACE={}",
+            std::env::var("BRAIN__AUTH__DEFAULT_NAMESPACE")
+                .ok()
+                .filter(|v| !v.is_empty())
+                .unwrap_or_else(|| "eval".to_string())
+        );
 
         let mut args: Vec<&str> = vec![
             "run",
@@ -177,25 +187,24 @@ impl ServerHandle {
         }
         // Full capability stack: embed + reranker + gliner NER all load from
         // the mounted volume; every tier stays enabled so the suite tests the
-        // real read + extraction paths.
+        // real read + extraction paths. The model dirs stay bespoke deploy
+        // paths (`BRAIN_EMBED_MODEL_DIR` / `BRAIN_RERANK_MODEL_DIR`); the
+        // classifier model path and HyPE tuning ride the generic
+        // `BRAIN__SECTION__FIELD` config override. HyPE itself is mandatory
+        // and always-on — there is no enable flag.
         args.extend_from_slice(&[
             "-e",
             "BRAIN_EMBED_MODEL_DIR=/models/bge-small-en-v1.5",
             "-e",
             "BRAIN_RERANK_MODEL_DIR=/models/bge-reranker-base",
             "-e",
-            "BRAIN_NER_MODEL_PATH=/models/gliner-small-v2.1",
-            // Write-time HyPE: the LLM generates hypothetical questions per
-            // memory, embedded into a pool the read path probes. Activates
-            // only when an LLM provider key is also forwarded below; without
-            // one the server logs an INFO skip, so this is safe to set
-            // unconditionally.
+            "BRAIN__EXTRACTORS__CLASSIFIER__MODEL_PATH=/models/gliner-small-v2.1",
             "-e",
-            "BRAIN_HYPE_ENABLED=true",
-            "-e",
-            "BRAIN_HYPE_NUM_QUESTIONS=6",
+            "BRAIN__EXTRACTORS__HYPE__NUM_QUESTIONS=6",
             "-e",
             &arena_env,
+            "-e",
+            &namespace_env,
         ]);
         if let Some(key) = llm_key_env.as_deref() {
             args.push("-e");
