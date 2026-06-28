@@ -88,9 +88,7 @@ async fn run_isolation(endpoint: SocketAddr) -> Result<ScenarioOutcome, HarnessE
     let secret = format!("{marker}: the vault code is alpha-tango-niner");
     agent_a
         .client()
-        .encode(
-            &EncodeBuilder::new(secret.as_str()).build(),
-        )
+        .encode(&EncodeBuilder::new(secret.as_str()).build())
         .await?;
 
     let b_hits = agent_b.recall(&marker, 10).await?;

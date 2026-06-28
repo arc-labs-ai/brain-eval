@@ -354,6 +354,11 @@ fn print_usage() {
          \n\
          env: BRAIN_EVAL_ENDPOINT, BRAIN_EVAL_MAX_QUESTIONS, BRAIN_EVAL_TOP_K,\n\
          \x20    BRAIN_EVAL_OUTPUT_DIR, BRAIN_EVAL_FORMATS, BRAIN_EVAL_QUESTION_TYPES,\n\
-         \x20    BRAIN_EVAL_EXTRACTION_DRAIN"
+         \x20    BRAIN_EVAL_EXTRACTION_DRAIN\n\
+         \n\
+         auth (external server only; the docker-boot harness sets these itself):\n\
+         \x20    BRAIN_EVAL_ADMIN_SECRET   required to mint data-plane keys via the admin plane\n\
+         \x20    BRAIN_EVAL_ADMIN_PORT     admin listener port (default 9092)\n\
+         \x20    BRAIN_EVAL_NAMESPACE      tenant the run writes under (default eval)"
     );
 }

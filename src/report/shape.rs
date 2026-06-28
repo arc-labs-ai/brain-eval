@@ -101,11 +101,10 @@ impl BenchmarkMeta {
         // `judge_type` is `"heuristic"` or `"llm:<provider>:<model>@<ver>"`.
         // The model is the middle: strip the `llm:` prefix and the
         // `@<ver>` suffix; a heuristic run reports `"heuristic"`.
-        let judge_model = judge_type
-            .strip_prefix("llm:")
-            .map_or_else(|| judge_type.to_owned(), |rest| {
-                rest.split('@').next().unwrap_or(rest).to_owned()
-            });
+        let judge_model = judge_type.strip_prefix("llm:").map_or_else(
+            || judge_type.to_owned(),
+            |rest| rest.split('@').next().unwrap_or(rest).to_owned(),
+        );
         Self {
             benchmark_id: benchmark_id.to_owned(),
             benchmark_name: benchmark_name.to_owned(),

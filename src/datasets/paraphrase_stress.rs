@@ -88,13 +88,25 @@ const FAMILIES: &[Family] = &[
         memory: "{name} {para} for a living.",
         question: "What is {name}'s job?",
         values: &[
-            ("pilots the night freight run between the two coasts", "Truck driver"),
+            (
+                "pilots the night freight run between the two coasts",
+                "Truck driver",
+            ),
             ("sets broken bones and reads the films afterward", "Doctor"),
             ("argues cases before the bench in a black robe", "Lawyer"),
             ("draws blueprints for the towers downtown", "Architect"),
-            ("keeps the books and files the quarterly returns", "Accountant"),
-            ("tends the dough through the small hours before dawn", "Baker"),
-            ("guides the great hull past the harbour reefs", "Ship captain"),
+            (
+                "keeps the books and files the quarterly returns",
+                "Accountant",
+            ),
+            (
+                "tends the dough through the small hours before dawn",
+                "Baker",
+            ),
+            (
+                "guides the great hull past the harbour reefs",
+                "Ship captain",
+            ),
         ],
         qtype: QuestionType::SingleHop,
     },
@@ -139,7 +151,10 @@ const FAMILIES: &[Family] = &[
             ("the longest day of the year", "June 21st"),
             ("the night the year turns over", "December 31st"),
             ("the first stroke of the new year", "January 1st"),
-            ("the day the nation lights its fireworks in midsummer", "July 4th"),
+            (
+                "the day the nation lights its fireworks in midsummer",
+                "July 4th",
+            ),
             ("the eve of the spring thaw", "March 20th"),
         ],
         qtype: QuestionType::Temporal,
@@ -150,12 +165,27 @@ const FAMILIES: &[Family] = &[
         memory: "{name} keeps {para} locked away in the study.",
         question: "What treasured object does {name} own?",
         values: &[
-            ("the wind-up timepiece that once belonged to a grandfather", "A pocket watch"),
-            ("the six-string box of polished spruce and rosewood", "A guitar"),
-            ("the leather-bound first edition signed by the author", "A book"),
-            ("the brass scope that brings the night sky close", "A telescope"),
+            (
+                "the wind-up timepiece that once belonged to a grandfather",
+                "A pocket watch",
+            ),
+            (
+                "the six-string box of polished spruce and rosewood",
+                "A guitar",
+            ),
+            (
+                "the leather-bound first edition signed by the author",
+                "A book",
+            ),
+            (
+                "the brass scope that brings the night sky close",
+                "A telescope",
+            ),
             ("the strung instrument played beneath the chin", "A violin"),
-            ("the painted board where ivory and ebony keys lie", "A piano"),
+            (
+                "the painted board where ivory and ebony keys lie",
+                "A piano",
+            ),
         ],
         qtype: QuestionType::Preference,
     },
@@ -164,11 +194,11 @@ const FAMILIES: &[Family] = &[
 /// Entity-name pool. Disjoint enough that crossing names with families
 /// never reuses a name across families (we slice it per-family below).
 const NAMES: &[&str] = &[
-    "Maria", "Theo", "Priya", "Omar", "Lena", "Sasha", "Diego", "Yuki", "Ingrid", "Mateo",
-    "Aisha", "Bjorn", "Carmen", "Dmitri", "Esme", "Farah", "Gustav", "Hana", "Ravi", "Nadia",
-    "Pablo", "Qadir", "Rosa", "Soren", "Tariq", "Uma", "Viktor", "Wren", "Xenia", "Yara",
-    "Zane", "Anouk", "Bilal", "Clara", "Dante", "Elif", "Felix", "Greta", "Hugo", "Iris",
-    "Jonas", "Kira", "Liam", "Mira", "Noor", "Otis", "Pia", "Quill",
+    "Maria", "Theo", "Priya", "Omar", "Lena", "Sasha", "Diego", "Yuki", "Ingrid", "Mateo", "Aisha",
+    "Bjorn", "Carmen", "Dmitri", "Esme", "Farah", "Gustav", "Hana", "Ravi", "Nadia", "Pablo",
+    "Qadir", "Rosa", "Soren", "Tariq", "Uma", "Viktor", "Wren", "Xenia", "Yara", "Zane", "Anouk",
+    "Bilal", "Clara", "Dante", "Elif", "Felix", "Greta", "Hugo", "Iris", "Jonas", "Kira", "Liam",
+    "Mira", "Noor", "Otis", "Pia", "Quill",
 ];
 
 /// One fully-materialized triple plus its distractor flag.
@@ -312,11 +342,59 @@ mod tests {
 
     /// Generic words that don't count as "content" overlap.
     const STOPWORDS: &[&str] = &[
-        "a", "an", "the", "to", "of", "in", "on", "at", "is", "are", "was", "were", "be", "do",
-        "does", "did", "what", "where", "when", "who", "which", "how", "why", "we", "i", "my",
-        "his", "her", "now", "should", "and", "or", "for", "with", "after", "all", "off", "it",
-        "any", "help", "without", "live", "speak", "job", "own", "food", "avoid", "serving",
-        "treasured", "object", "child", "born", "date",
+        "a",
+        "an",
+        "the",
+        "to",
+        "of",
+        "in",
+        "on",
+        "at",
+        "is",
+        "are",
+        "was",
+        "were",
+        "be",
+        "do",
+        "does",
+        "did",
+        "what",
+        "where",
+        "when",
+        "who",
+        "which",
+        "how",
+        "why",
+        "we",
+        "i",
+        "my",
+        "his",
+        "her",
+        "now",
+        "should",
+        "and",
+        "or",
+        "for",
+        "with",
+        "after",
+        "all",
+        "off",
+        "it",
+        "any",
+        "help",
+        "without",
+        "live",
+        "speak",
+        "job",
+        "own",
+        "food",
+        "avoid",
+        "serving",
+        "treasured",
+        "object",
+        "child",
+        "born",
+        "date",
     ];
 
     fn content_tokens(s: &str) -> HashSet<String> {
@@ -334,7 +412,11 @@ mod tests {
             .expect("load");
         let expected: usize = FAMILIES.iter().map(|f| f.values.len()).sum();
         assert_eq!(insts.len(), expected);
-        assert!(insts.len() >= 38, "expected ~40 generated triples, got {}", insts.len());
+        assert!(
+            insts.len() >= 38,
+            "expected ~40 generated triples, got {}",
+            insts.len()
+        );
         assert!(insts
             .iter()
             .all(|i| i.conversation_id.as_deref() == Some(CONVERSATION_ID)));
@@ -345,8 +427,12 @@ mod tests {
     /// instances in identical order.
     #[test]
     fn generation_is_deterministic() {
-        let a = ParaphraseStressBenchmark.load(Path::new(".")).expect("load");
-        let b = ParaphraseStressBenchmark.load(Path::new(".")).expect("load");
+        let a = ParaphraseStressBenchmark
+            .load(Path::new("."))
+            .expect("load");
+        let b = ParaphraseStressBenchmark
+            .load(Path::new("."))
+            .expect("load");
         assert_eq!(a.len(), b.len());
         for (x, y) in a.iter().zip(b.iter()) {
             assert_eq!(x.question_id, y.question_id);
@@ -358,7 +444,9 @@ mod tests {
     /// Question ids must be unique.
     #[test]
     fn question_ids_are_unique() {
-        let insts = ParaphraseStressBenchmark.load(Path::new(".")).expect("load");
+        let insts = ParaphraseStressBenchmark
+            .load(Path::new("."))
+            .expect("load");
         let ids: HashSet<_> = insts.iter().map(|i| i.question_id.clone()).collect();
         assert_eq!(ids.len(), insts.len(), "duplicate question_id");
     }

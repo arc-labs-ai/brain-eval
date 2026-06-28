@@ -10,10 +10,10 @@ description = "Evaluation, benchmarking, and report generation for Brain — the
 [features]
 default = []
 # Enables LLM-as-judge + LLM answer synthesis. Off by default — real LLM
-# calls cost money and require live API keys. Build/run with `--features
-# live-llm` and an `ANTHROPIC_API_KEY` (or `OPENAI_API_KEY`) to opt in;
-# the runner falls back to the heuristic judge when the feature is off or
-# no key is set.
+# calls cost money and require a live API key. Build/run with `--features
+# live-llm` and the single shared `BRAIN__LLM__API_KEY` (provider derived
+# from the model id) to opt in; the runner falls back to the heuristic
+# judge when the feature is off or no key is set.
 live-llm = []
 
 # ----------------------------------------------------------------------------

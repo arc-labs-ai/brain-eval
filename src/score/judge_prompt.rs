@@ -91,7 +91,8 @@ pub fn verdict_type_guidance(qtype: QuestionType) -> &'static str {
 /// answer? This is the answer-supporting-context-recall judge — it grades
 /// retrieval, not synthesis. `{question}`, `{ground_truth}`, `{retrieved}`
 /// are filled per call.
-pub const SUPPORT_PROMPT_TEMPLATE: &str = "You are auditing the RETRIEVAL stage of a memory question-answering \
+pub const SUPPORT_PROMPT_TEMPLATE: &str =
+    "You are auditing the RETRIEVAL stage of a memory question-answering \
 system. You are given a question, its gold answer, and the memories the \
 system retrieved. Decide whether the gold answer can be derived ENTIRELY \
 from the retrieved memories — i.e. the memories contain enough information \

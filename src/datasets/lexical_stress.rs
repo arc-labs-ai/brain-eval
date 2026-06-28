@@ -209,7 +209,10 @@ mod tests {
     fn loads_all_cases() {
         let insts = LexicalStressBenchmark.load(Path::new(".")).expect("load");
         assert_eq!(insts.len(), CASES.len());
-        assert!(insts.len() >= 8 && insts.len() <= 12, "8-12 hand-authored cases");
+        assert!(
+            insts.len() >= 8 && insts.len() <= 12,
+            "8-12 hand-authored cases"
+        );
         assert!(insts
             .iter()
             .all(|i| i.conversation_id.as_deref() == Some(CONVERSATION_ID)));

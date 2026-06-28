@@ -329,7 +329,11 @@ async fn drift_probe(harness: &BrainEvalHarness, salt: &str, top_k: u32) -> f64 
             .include_text(true)
             .build();
         if let Ok(answer) = harness.client().recall(&req).await {
-            if answer.memories.first().is_some_and(|m| m.text.contains(&needle)) {
+            if answer
+                .memories
+                .first()
+                .is_some_and(|m| m.text.contains(&needle))
+            {
                 hit_at_1 += 1;
             }
         }

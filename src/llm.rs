@@ -1,10 +1,13 @@
 //! Shared LLM HTTP client for the `live-llm` eval paths (answer synthesis
 //! and the answer judge).
 //!
-//! Provider-agnostic: auto-detects `ANTHROPIC_API_KEY` (Claude, default) or
-//! `OPENAI_API_KEY`; the model is overridable via a caller-named env var
-//! (so the synthesizer and judge can use different models). Compiled only
-//! under the `live-llm` feature (it pulls in `reqwest`).
+//! Provider-agnostic and single-credential: the key comes from the one
+//! shared `BRAIN__LLM__API_KEY` (the same var Brain itself uses), and the
+//! provider (Anthropic / OpenAI) is derived from the model id. The model
+//! is overridable via a caller-named env var (so the synthesizer and judge
+//! can use different models), falling back to `BRAIN__LLM__MODEL` then a
+//! built-in default. Compiled only under the `live-llm` feature (it pulls
+//! in `reqwest`).
 //!
 //! [`LlmClient::complete`] retries transient failures (5xx / 429 / network)
 //! and fails fast on 4xx (bad key, no credit, unknown model), returning the
@@ -17,8 +20,9 @@ use serde::Deserialize;
 
 const ANTHROPIC_URL: &str = "https://api.anthropic.com/v1/messages";
 const OPENAI_URL: &str = "https://api.openai.com/v1/chat/completions";
-const DEFAULT_ANTHROPIC_MODEL: &str = "claude-haiku-4-5-20251001";
-const DEFAULT_OPENAI_MODEL: &str = "gpt-4o-mini";
+/// Default model when neither the caller-specific override nor
+/// `BRAIN__LLM__MODEL` is set. Provider is derived from the id.
+const DEFAULT_MODEL: &str = "gpt-4o-mini";
 const MAX_RETRIES: u32 = 3;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 
@@ -43,23 +47,20 @@ struct CallError {
 }
 
 impl LlmClient {
-    /// Build from the environment, or `None` if no provider key is set.
-    /// `model_override_env` names the env var that overrides the model
-    /// (e.g. `BRAIN_EVAL_JUDGE_MODEL`); otherwise the provider default.
+    /// Build from the single shared credential `BRAIN__LLM__API_KEY`, or
+    /// `None` if it is unset. The model resolves from `model_override_env`
+    /// (e.g. `BRAIN_EVAL_JUDGE_MODEL`) first, then the shared
+    /// `BRAIN__LLM__MODEL`, then [`DEFAULT_MODEL`]; the provider is derived
+    /// from the resolved model id.
     #[must_use]
     pub fn from_env(model_override_env: &str) -> Option<Self> {
-        let model_override = std::env::var(model_override_env)
+        let api_key = nonempty_env("BRAIN__LLM__API_KEY")?;
+        let model = std::env::var(model_override_env)
             .ok()
-            .filter(|s| !s.trim().is_empty());
-
-        let (provider, api_key, default_model) = if let Some(k) = nonempty_env("ANTHROPIC_API_KEY")
-        {
-            (Provider::Anthropic, k, DEFAULT_ANTHROPIC_MODEL)
-        } else if let Some(k) = nonempty_env("OPENAI_API_KEY") {
-            (Provider::OpenAI, k, DEFAULT_OPENAI_MODEL)
-        } else {
-            return None;
-        };
+            .filter(|s| !s.trim().is_empty())
+            .or_else(|| nonempty_env("BRAIN__LLM__MODEL"))
+            .unwrap_or_else(|| DEFAULT_MODEL.to_string());
+        let provider = provider_for_model(&model);
 
         let client = reqwest::Client::builder()
             .timeout(REQUEST_TIMEOUT)
@@ -70,7 +71,7 @@ impl LlmClient {
             client,
             provider,
             api_key,
-            model: model_override.unwrap_or_else(|| default_model.to_string()),
+            model,
         })
     }
 
@@ -194,6 +195,16 @@ impl LlmClient {
 
 fn nonempty_env(key: &str) -> Option<String> {
     std::env::var(key).ok().filter(|v| !v.trim().is_empty())
+}
+
+/// Derive the provider from the model id, matching Brain's own rule:
+/// `claude*` → Anthropic, everything else → OpenAI.
+fn provider_for_model(model: &str) -> Provider {
+    if model.to_ascii_lowercase().starts_with("claude") {
+        Provider::Anthropic
+    } else {
+        Provider::OpenAI
+    }
 }
 
 /// Network/transport error — worth a retry.

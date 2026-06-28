@@ -104,9 +104,9 @@ const ATTRIBUTES: &[Attribute] = &[
 
 /// Entity-name pool, distinct per slot.
 const NAMES: &[&str] = &[
-    "Maria", "Theo", "Priya", "Omar", "Lena", "Sasha", "Diego", "Yuki", "Ingrid", "Mateo",
-    "Aisha", "Bjorn", "Carmen", "Dmitri", "Esme", "Farah", "Gustav", "Hana", "Ravi", "Nadia",
-    "Pablo", "Rosa", "Soren", "Tariq", "Uma", "Viktor", "Wren", "Xenia", "Yara", "Zane",
+    "Maria", "Theo", "Priya", "Omar", "Lena", "Sasha", "Diego", "Yuki", "Ingrid", "Mateo", "Aisha",
+    "Bjorn", "Carmen", "Dmitri", "Esme", "Farah", "Gustav", "Hana", "Ravi", "Nadia", "Pablo",
+    "Rosa", "Soren", "Tariq", "Uma", "Viktor", "Wren", "Xenia", "Yara", "Zane",
 ];
 
 /// One materialized entity update: the two turns plus both questions.

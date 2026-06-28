@@ -42,9 +42,7 @@ fn id_set(memories: &[brain_db_sdk::wire::types::MemoryResult]) -> BTreeSet<u128
 
 fn contains_token(memories: &[brain_db_sdk::wire::types::MemoryResult], token: &str) -> bool {
     let t = token.to_lowercase();
-    memories
-        .iter()
-        .any(|m| m.text.to_lowercase().contains(&t))
+    memories.iter().any(|m| m.text.to_lowercase().contains(&t))
 }
 
 /// Recall, retrying briefly so a just-ingested vector has time to land in the
@@ -67,7 +65,9 @@ async fn recall_settled(
 #[tokio::test]
 #[ignore]
 async fn determinism_same_query_same_set() {
-    let h = BrainEvalHarness::connect(endpoint()).await.expect("connect");
+    let h = BrainEvalHarness::connect(endpoint())
+        .await
+        .expect("connect");
     h.ingest(&turns(&[
         "The Zephyr-9 reactor was commissioned in Helsinki.",
         "Maple syrup production peaked during the cold snap.",
@@ -83,8 +83,14 @@ async fn determinism_same_query_same_set() {
             .expect("recall")
             .memories,
     );
-    assert_eq!(a, b, "identical query over identical store must return the identical set");
-    assert!(!a.is_empty(), "the answer set must not be empty for a present fact");
+    assert_eq!(
+        a, b,
+        "identical query over identical store must return the identical set"
+    );
+    assert!(
+        !a.is_empty(),
+        "the answer set must not be empty for a present fact"
+    );
 }
 
 /// INVARIANT 2 — MONOTONE RECALL: a distinctive stored fact is returned for a
@@ -92,7 +98,9 @@ async fn determinism_same_query_same_set() {
 #[tokio::test]
 #[ignore]
 async fn monotone_recall_distinctive_fact() {
-    let h = BrainEvalHarness::connect(endpoint()).await.expect("connect");
+    let h = BrainEvalHarness::connect(endpoint())
+        .await
+        .expect("connect");
     h.ingest(&turns(&[
         "Quentin adopted a three-legged greyhound named Pascal.",
         "The quarterly budget review was postponed to next Tuesday.",
@@ -128,12 +136,16 @@ async fn irrelevance_insensitivity() {
     ];
     let q = "What was Ingrid's dissertation about?";
 
-    let a = BrainEvalHarness::connect(endpoint()).await.expect("connect a");
+    let a = BrainEvalHarness::connect(endpoint())
+        .await
+        .expect("connect a");
     a.ingest(&turns(&base)).await.expect("ingest a");
     tokio::time::sleep(Duration::from_secs(2)).await;
     let ma = recall_settled(&a, q).await;
 
-    let b = BrainEvalHarness::connect(endpoint()).await.expect("connect b");
+    let b = BrainEvalHarness::connect(endpoint())
+        .await
+        .expect("connect b");
     let mut both: Vec<&str> = base.to_vec();
     both.extend_from_slice(&noise);
     b.ingest(&turns(&both)).await.expect("ingest b");
@@ -143,7 +155,10 @@ async fn irrelevance_insensitivity() {
     let in_a = contains_token(&ma, "glacier") || contains_token(&ma, "dissertation");
     let in_b = contains_token(&mb, "glacier") || contains_token(&mb, "dissertation");
     assert!(in_a, "gold memory must surface without noise");
-    assert!(in_b, "gold memory must STILL surface when unrelated memories are added");
+    assert!(
+        in_b,
+        "gold memory must STILL surface when unrelated memories are added"
+    );
 }
 
 /// INVARIANT 4 (diagnostic) — ABSTENTION: a query with no supporting memory
@@ -151,7 +166,9 @@ async fn irrelevance_insensitivity() {
 #[tokio::test]
 #[ignore]
 async fn abstention_on_unsupported_query() {
-    let h = BrainEvalHarness::connect(endpoint()).await.expect("connect");
+    let h = BrainEvalHarness::connect(endpoint())
+        .await
+        .expect("connect");
     h.ingest(&turns(&[
         "The lighthouse keeper repainted the railings in June.",
         "Tidal charts for the strait were updated last week.",
@@ -161,7 +178,10 @@ async fn abstention_on_unsupported_query() {
     .expect("ingest");
     tokio::time::sleep(Duration::from_secs(2)).await;
     let out = h
-        .recall("What programming language does the database use internally?", 50)
+        .recall(
+            "What programming language does the database use internally?",
+            50,
+        )
         .await
         .expect("recall");
     // Strong form: honest abstention. Reported, not asserted hard, since the
@@ -173,7 +193,10 @@ async fn abstention_on_unsupported_query() {
         out.memories.len()
     );
     assert!(
-        !matches!(out.answer_kind, brain_db_sdk::wire::types::AnswerKindWire::Single),
+        !matches!(
+            out.answer_kind,
+            brain_db_sdk::wire::types::AnswerKindWire::Single
+        ),
         "an unsupported query must not commit to a confident Single"
     );
 }

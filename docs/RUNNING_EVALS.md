@@ -13,11 +13,39 @@ ground truth → score, and compare to the competitor baselines in
   LoCoMo).
 - **LLM-as-judge** (`--features live-llm` + an API key): a real model grades
   each answer correct / partial / incorrect. Required for honest LongMemEval /
-  LoCoMo numbers. Provider is auto-detected — `ANTHROPIC_API_KEY` (Claude,
-  default) or `OPENAI_API_KEY`; override the model with
-  `BRAIN_EVAL_JUDGE_MODEL`. A transient API failure on one question falls back
-  to the heuristic for that question (the run never aborts). The report header
-  records which judge actually ran (`llm:anthropic:<model>` vs `heuristic`).
+  LoCoMo numbers. The judge uses the **single shared credential**
+  `BRAIN__LLM__API_KEY` — the same variable Brain itself uses, so one key drives
+  both the server's write-time LLM and the eval's judge. The model is
+  `BRAIN_EVAL_JUDGE_MODEL` (judge-specific override) → `BRAIN__LLM__MODEL` →
+  `gpt-4o-mini`, and the **provider is derived from the model id** (a `gpt-*`
+  id ⇒ OpenAI, a `claude-*` id ⇒ Anthropic) — there is no separate
+  `ANTHROPIC_API_KEY`/`OPENAI_API_KEY` auto-detect any more. A transient API
+  failure on one question falls back to the heuristic for that question (the run
+  never aborts). The report header records which judge actually ran
+  (`llm:openai:<model>` / `llm:anthropic:<model>` vs `heuristic`).
+
+## Authentication (mandatory)
+
+Brain requires a per-connection API key — there is no anonymous connect. The
+eval **mints** a data-plane key for `(namespace, agent)` through the server's
+admin HTTP listener, then connects with it.
+
+- **Docker-boot runs** (the `*_live` tests via `ServerHandle::start_docker`, and
+  `just up`'s docker path) configure this automatically: the harness sets the
+  server's admin secret + admin address and mints against the loopback admin
+  port. Nothing to do.
+- **External-server runs** (you booted the server yourself and point
+  `--endpoint`/`BRAIN_EVAL_ENDPOINT` at it) must be told how to reach + gate the
+  admin plane:
+  - `BRAIN_EVAL_ADMIN_SECRET` — **required.** Must equal the server's
+    `BRAIN__ADMIN__TOKEN`. Without it the run fails fast at startup
+    ("preflight: cannot mint data-plane keys …") rather than silently recording
+    every question as failed.
+  - `BRAIN_EVAL_ADMIN_PORT` — admin listener port on the endpoint host
+    (default `9092`). The server's admin listener must be reachable there, i.e.
+    boot it with `BRAIN__SERVER__ADMIN_ADDR=0.0.0.0:9092` (the default is
+    loopback-only).
+  - `BRAIN_EVAL_NAMESPACE` — tenant the run writes under (default `eval`).
 
 ## One-time setup
 
@@ -38,12 +66,15 @@ LoCoMo and LongMemEval-S are the stronger benchmarks to start with.
 ## Run
 
 ```bash
-# 2. Boot the full-stack server (reranker + extractors on).
-just up 38100                       # 127.0.0.1:38100
+# 2. Boot the full-stack server (reranker + extractors on) with the admin
+#    plane reachable + gated so the eval can mint a key.
+BRAIN__SERVER__ADMIN_ADDR=0.0.0.0:9092 BRAIN__ADMIN__TOKEN=eval-admin-secret \
+    just up 38100                   # 127.0.0.1:38100 (data), :9092 (admin)
 
 # 3. Run a benchmark with the LLM judge.
 export BRAIN_EVAL_DATASETS_DIR=~/brain-datasets
-export ANTHROPIC_API_KEY=sk-ant-...     # or OPENAI_API_KEY=sk-...
+export BRAIN__LLM__API_KEY=sk-...           # one key; provider derived from model
+export BRAIN_EVAL_ADMIN_SECRET=eval-admin-secret   # must match BRAIN__ADMIN__TOKEN
 cargo run --release --features live-llm --bin brain-eval -- \
     longmemeval-s --endpoint 127.0.0.1:38100
 #   benchmarks: smoke | dmr | longmemeval-s | locomo
@@ -54,7 +85,8 @@ Useful env knobs (all optional):
 - `BRAIN_EVAL_MAX_QUESTIONS=N` — cap questions (cost control; LLM judge bills
   one call per question).
 - `BRAIN_EVAL_TOP_K`, `BRAIN_EVAL_OUTPUT_DIR`, `BRAIN_EVAL_FORMATS`.
-- `BRAIN_EVAL_JUDGE_MODEL` — override the judge model.
+- `BRAIN_EVAL_JUDGE_MODEL` — override the judge model (else `BRAIN__LLM__MODEL`,
+  else `gpt-4o-mini`).
 
 Without `--features live-llm` (or without a key) the same commands run on the
 heuristic judge — fine as a free smoke, not for headline LongMemEval/LoCoMo

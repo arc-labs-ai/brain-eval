@@ -237,6 +237,21 @@ impl EvalRunner {
         // cache it so a reconnect of the same agent reuses its token rather
         // than minting a fresh one each time.
         let minter = self.config.key_minter();
+        // Preflight: prove the admin plane can mint BEFORE iterating
+        // conversations. Without this, a misconfigured admin plane (missing
+        // BRAIN_EVAL_ADMIN_SECRET, wrong admin port, unreachable server) makes
+        // every per-conversation mint fail and the run silently records all
+        // questions as "failed" with no obvious cause. Fail fast with one clear
+        // error instead. The throwaway key lands in the eval namespace and is
+        // harmless. The docker-boot harness configures the admin plane itself.
+        if let Err(e) = minter.mint(brain_db_sdk::new_id()).await {
+            return Err(EvalError::Pipeline(format!(
+                "preflight: cannot mint data-plane keys via the admin plane — {e}. \
+                 The docker-boot harness sets the admin secret automatically; for an \
+                 external server set BRAIN_EVAL_ADMIN_SECRET (and BRAIN_EVAL_ADMIN_PORT \
+                 if the admin listener is not on 9092)."
+            )));
+        }
         let mut tokens: BTreeMap<[u8; 16], String> = BTreeMap::new();
 
         for (conv_key, idxs) in &groups {
