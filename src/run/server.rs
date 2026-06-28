@@ -27,6 +27,15 @@ use std::time::Duration;
 use tokio::process::Command;
 use tokio::time::{sleep, Instant};
 
+use crate::run::auth::{KeyMinter, DEFAULT_NAMESPACE};
+
+/// Fixed admin bearer secret the eval boots its docker servers with and
+/// mints against. The brain image ships a placeholder secret; we override it
+/// with a known value so the eval (and only the eval) can reach the admin
+/// plane. Not a real secret — the admin listener is published only to the
+/// host loopback for the test's lifetime.
+const EVAL_ADMIN_SECRET: &str = "eval-admin-secret";
+
 /// How a [`ServerHandle`] obtained its server.
 enum Backing {
     /// Connected to a server this handle did not start.
@@ -39,6 +48,12 @@ enum Backing {
 pub struct ServerHandle {
     endpoint: SocketAddr,
     backing: Backing,
+    /// Base URL of the admin plane (`http://host:port`) used to mint keys.
+    admin_base: String,
+    /// Bearer secret for the admin plane.
+    admin_secret: String,
+    /// Tenant namespace minted keys bind to.
+    namespace: String,
 }
 
 /// Knobs for [`ServerHandle::start_docker`]. `Default` mirrors
@@ -54,6 +69,10 @@ pub struct DockerServerOpts {
     pub data_port: u16,
     /// Host port mapped to the container's metrics/health plane (`9091`).
     pub metrics_port: u16,
+    /// Host port mapped to the container's admin plane (`9092`). The eval
+    /// mints data-plane keys through this port. Kept distinct from
+    /// `data_port` / `metrics_port`.
+    pub admin_port: u16,
     /// Named docker volume holding the full model set (embed + reranker +
     /// gliner), mounted read-only at `/models`. Provisioned by brain-db's
     /// `.devcontainer/bootstrap-model.sh`. The three subdirectories
@@ -79,6 +98,7 @@ impl Default for DockerServerOpts {
             container_name: "brain-eval-server".to_string(),
             data_port: 18080,
             metrics_port: 19091,
+            admin_port: 19092,
             models_volume: "brain-models".to_string(),
             arena_capacity: "256MiB".to_string(),
             data_volume: None,
@@ -112,12 +132,25 @@ pub enum ServerError {
 
 impl ServerHandle {
     /// Use a server this process did not start. Dropping the handle does
-    /// not stop it.
+    /// not stop it. The admin plane (for [`key_minter`](Self::key_minter)) is
+    /// resolved from the environment — see [`KeyMinter::from_external_env`].
     #[must_use]
     pub fn external(endpoint: SocketAddr) -> Self {
+        // Mirror KeyMinter::from_external_env so the handle and a directly
+        // built minter agree on where the admin plane is.
+        let minter = KeyMinter::from_external_env(endpoint);
+        // Reconstruct the parts the handle stores. KeyMinter owns them
+        // privately, so derive them the same way it does.
+        let admin_port = std::env::var(crate::run::auth::ENV_ADMIN_PORT)
+            .ok()
+            .and_then(|p| p.parse::<u16>().ok())
+            .unwrap_or(crate::run::auth::DEFAULT_ADMIN_PORT);
         Self {
             endpoint,
             backing: Backing::External,
+            admin_base: format!("http://{}:{admin_port}", endpoint.ip()),
+            admin_secret: std::env::var(crate::run::auth::ENV_ADMIN_SECRET).unwrap_or_default(),
+            namespace: minter.namespace().to_string(),
         }
     }
 
@@ -129,6 +162,10 @@ impl ServerHandle {
 
         let data_map = format!("{}:8080", opts.data_port);
         let metrics_map = format!("{}:9091", opts.metrics_port);
+        // Publish the admin plane so the host can mint keys. The image binds
+        // it to loopback by default; we rebind it to the container's external
+        // interface (see admin_addr_env) and map it out here.
+        let admin_map = format!("{}:9092", opts.admin_port);
         // The whole model volume mounts at /models; the env vars below point
         // each tier at its subdirectory.
         let model_mount = format!("{}:/models:ro", opts.models_volume);
@@ -148,20 +185,12 @@ impl ServerHandle {
             .ok()
             .filter(|v| !v.is_empty())
             .map(|v| format!("BRAIN__LLM__API_KEY={v}"));
-        // Scope every eval write to a real namespace. The server derives the
-        // tenant from auth: a permissive connection with no configured default
-        // namespace resolves to the reserved `brain` system namespace, which
-        // rejects user writes under the server's fail-closed tenancy mode. We
-        // boot the container with a permissive default namespace so the whole
-        // run lands in one real tenant. Defaults to `eval`; override via the
-        // eval process env.
-        let namespace_env = format!(
-            "BRAIN__AUTH__DEFAULT_NAMESPACE={}",
-            std::env::var("BRAIN__AUTH__DEFAULT_NAMESPACE")
-                .ok()
-                .filter(|v| !v.is_empty())
-                .unwrap_or_else(|| "eval".to_string())
-        );
+        // Bind the admin plane to the container's external interface (it
+        // defaults to loopback) and gate it with a known secret, so the eval
+        // can mint per-agent data-plane keys through the published port. The
+        // admin listener is fail-closed: it refuses to start without a token.
+        let admin_addr_env = "BRAIN__SERVER__ADMIN_ADDR=0.0.0.0:9092".to_string();
+        let admin_token_env = format!("BRAIN__ADMIN__TOKEN={EVAL_ADMIN_SECRET}");
 
         let mut args: Vec<&str> = vec![
             "run",
@@ -178,6 +207,8 @@ impl ServerHandle {
             &data_map,
             "-p",
             &metrics_map,
+            "-p",
+            &admin_map,
             "-v",
             &model_mount,
         ];
@@ -204,7 +235,9 @@ impl ServerHandle {
             "-e",
             &arena_env,
             "-e",
-            &namespace_env,
+            &admin_addr_env,
+            "-e",
+            &admin_token_env,
         ]);
         if let Some(key) = llm_key_env.as_deref() {
             args.push("-e");
@@ -220,6 +253,11 @@ impl ServerHandle {
             backing: Backing::Container {
                 name: opts.container_name.clone(),
             },
+            // The admin plane is published on the host loopback at admin_port,
+            // gated by the secret we booted with.
+            admin_base: format!("http://127.0.0.1:{}", opts.admin_port),
+            admin_secret: EVAL_ADMIN_SECRET.to_string(),
+            namespace: DEFAULT_NAMESPACE.to_string(),
         };
 
         handle
@@ -232,6 +270,17 @@ impl ServerHandle {
     #[must_use]
     pub fn endpoint(&self) -> SocketAddr {
         self.endpoint
+    }
+
+    /// A [`KeyMinter`] bound to this server's admin plane and tenant
+    /// namespace. Use it to mint per-agent data-plane keys before connecting.
+    #[must_use]
+    pub fn key_minter(&self) -> KeyMinter {
+        KeyMinter::new(
+            self.admin_base.clone(),
+            self.admin_secret.clone(),
+            self.namespace.clone(),
+        )
     }
 
     /// Stop and remove the container (no-op for an external server).

@@ -57,9 +57,10 @@ async fn run_restart_recovery(
     let marker = format!("recovery-marker-{}", super::hex16(agent_id));
 
     {
-        let h = BrainEvalHarness::connect_with_agent(server1.endpoint(), agent_id)
-            .await
-            .map_err(|e| format!("connect #1: {e}"))?;
+        let h =
+            BrainEvalHarness::connect_minted(&server1.key_minter(), server1.endpoint(), agent_id)
+                .await
+                .map_err(|e| format!("connect #1: {e}"))?;
         for i in 0..N {
             let text = format!("{marker}: durable fact number {i}");
             let req = EncodeBuilder::new(text.as_str()).build();
@@ -82,9 +83,10 @@ async fn run_restart_recovery(
         .map_err(|e| format!("restart boot: {e}"))?;
 
     let recovered = {
-        let h = BrainEvalHarness::connect_with_agent(server2.endpoint(), agent_id)
-            .await
-            .map_err(|e| format!("connect #2: {e}"))?;
+        let h =
+            BrainEvalHarness::connect_minted(&server2.key_minter(), server2.endpoint(), agent_id)
+                .await
+                .map_err(|e| format!("connect #2: {e}"))?;
         // Pull more than N so we can count distinct recovered facts.
         let out = h
             .recall(&marker, (N as u32) * 2)

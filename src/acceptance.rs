@@ -17,6 +17,7 @@
 
 use std::net::SocketAddr;
 
+use crate::run::auth::KeyMinter;
 use crate::run::harness::BrainEvalHarness;
 use crate::run::server::DockerServerOpts;
 use crate::scale::{
@@ -157,14 +158,17 @@ impl AcceptanceConfig {
     /// heavy for an emulated dev container.
     #[must_use]
     pub fn full_scale(endpoint: SocketAddr) -> Self {
-        let volume_opts = |name: &str, data_port, metrics_port, vol: &str| DockerServerOpts {
-            container_name: name.to_string(),
-            data_port,
-            metrics_port,
-            data_volume: Some(vol.to_string()),
-            // 1M slots × 1600 B ≈ 1.6 GiB of arena; size with headroom.
-            arena_capacity: "2GiB".to_string(),
-            ..DockerServerOpts::default()
+        let volume_opts = |name: &str, data_port, metrics_port, admin_port, vol: &str| {
+            DockerServerOpts {
+                container_name: name.to_string(),
+                data_port,
+                metrics_port,
+                admin_port,
+                data_volume: Some(vol.to_string()),
+                // 1M slots × 1600 B ≈ 1.6 GiB of arena; size with headroom.
+                arena_capacity: "2GiB".to_string(),
+                ..DockerServerOpts::default()
+            }
         };
         Self {
             endpoint,
@@ -181,12 +185,25 @@ impl AcceptanceConfig {
                 "brain-acc-recovery",
                 28080,
                 29091,
+                29191,
                 "brain-acc-recovery-data",
             ),
             run_chaos: true,
-            chaos_opts: volume_opts("brain-acc-chaos", 28081, 29092, "brain-acc-chaos-data"),
+            chaos_opts: volume_opts(
+                "brain-acc-chaos",
+                28081,
+                29092,
+                29192,
+                "brain-acc-chaos-data",
+            ),
             run_storage: true,
-            storage_opts: volume_opts("brain-acc-storage", 28082, 29093, "brain-acc-storage-data"),
+            storage_opts: volume_opts(
+                "brain-acc-storage",
+                28082,
+                29093,
+                29193,
+                "brain-acc-storage-data",
+            ),
             storage_n: 1_000_000,
             // Spec disk budget: ~8-10 GB per shard at 1M ⇒ ≤ ~10 KiB/memory.
             storage_max_bytes_per_memory: Some(10.0 * 1024.0),
@@ -235,7 +252,8 @@ pub async fn run_acceptance(cfg: AcceptanceConfig) -> AcceptanceReport {
             }
 
             // --- concurrent throughput (perf ops/s + correctness no-error)
-            match run_concurrent_throughput(cfg.endpoint, &cfg.concurrent).await {
+            let minter = KeyMinter::from_external_env(cfg.endpoint);
+            match run_concurrent_throughput(&minter, cfg.endpoint, &cfg.concurrent).await {
                 Ok(report) => {
                     for r in &report.results {
                         gates.push(Gate {

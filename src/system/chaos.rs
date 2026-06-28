@@ -26,7 +26,7 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use brain_db_sdk::wire::types::EncodeRequest;
-use brain_db_sdk::{new_id, BrainClient, ClientConfig, RecallBuilder};
+use brain_db_sdk::{new_id, Auth, BrainClient, ClientConfig, RecallBuilder};
 
 use super::ScenarioOutcome;
 use crate::run::server::{remove_volume, DockerServerOpts, ServerHandle};
@@ -75,9 +75,17 @@ async fn run(opts: DockerServerOpts, _volume: &str) -> Result<ScenarioOutcome, S
             .await
             .map_err(|e| format!("cycle {cycle}: boot: {e}"))?;
 
+        // Mint this boot's data-plane key for the single agent. The admin
+        // plane is fresh each boot, so we re-mint after every restart.
+        let token = server
+            .key_minter()
+            .mint(agent_id)
+            .await
+            .map_err(|e| format!("cycle {cycle}: mint: {e}"))?;
+
         // Recovery check: every ACK from prior cycles must still be present.
         if !acked.is_empty() {
-            let survived = count_survivors(server.endpoint(), agent_id, &marker, &acked)
+            let survived = count_survivors(server.endpoint(), &token, &marker, &acked)
                 .await
                 .map_err(|e| format!("cycle {cycle}: post-restart verify: {e}"))?;
             if survived != acked.len() {
@@ -96,8 +104,9 @@ async fn run(opts: DockerServerOpts, _volume: &str) -> Result<ScenarioOutcome, S
         // Write a fresh batch in a spawned task; SIGKILL mid-stream.
         let endpoint = server.endpoint();
         let marker_c = marker.clone();
+        let token_c = token.clone();
         let writer = tokio::spawn(async move {
-            write_until_dead(endpoint, agent_id, &marker_c, next_index).await
+            write_until_dead(endpoint, &token_c, &marker_c, next_index).await
         });
         tokio::time::sleep(KILL_DELAY).await;
         server.stop().await; // SIGKILL — no graceful flush.
@@ -118,7 +127,12 @@ async fn run(opts: DockerServerOpts, _volume: &str) -> Result<ScenarioOutcome, S
     let server = ServerHandle::start_docker(opts.clone())
         .await
         .map_err(|e| format!("final boot: {e}"))?;
-    let survived = count_survivors(server.endpoint(), agent_id, &marker, &acked)
+    let token = server
+        .key_minter()
+        .mint(agent_id)
+        .await
+        .map_err(|e| format!("final mint: {e}"))?;
+    let survived = count_survivors(server.endpoint(), &token, &marker, &acked)
         .await
         .map_err(|e| format!("final verify: {e}"))?;
     server.stop().await;
@@ -149,12 +163,12 @@ async fn run(opts: DockerServerOpts, _volume: &str) -> Result<ScenarioOutcome, S
 /// kill time errors and is never recorded.
 async fn write_until_dead(
     endpoint: SocketAddr,
-    agent_id: [u8; 16],
+    token: &str,
     marker: &str,
     start_index: usize,
 ) -> Vec<(u128, String)> {
     let mut acked = Vec::new();
-    let client = match BrainClient::connect_with(endpoint, client_config(agent_id)).await {
+    let client = match BrainClient::connect_with(endpoint, client_config(token)).await {
         Ok(c) => c,
         Err(_) => return acked,
     };
@@ -177,11 +191,11 @@ async fn write_until_dead(
 /// Count how many of `acked` resurface in a single RECALL on the marker.
 async fn count_survivors(
     endpoint: SocketAddr,
-    agent_id: [u8; 16],
+    token: &str,
     marker: &str,
     acked: &[(u128, String)],
 ) -> Result<usize, String> {
-    let client = BrainClient::connect_with(endpoint, client_config(agent_id))
+    let client = BrainClient::connect_with(endpoint, client_config(token))
         .await
         .map_err(|e| e.to_string())?;
     let k = (acked.len() * 2).clamp(10, 1000) as u32;
@@ -189,18 +203,19 @@ async fn count_survivors(
         .max_results(k)
         .include_text(false)
         .build();
-    let hits = client.recall(&req).await.map_err(|e| e.to_string())?.memories;
+    let hits = client
+        .recall(&req)
+        .await
+        .map_err(|e| e.to_string())?
+        .memories;
     let ids: HashSet<u128> = hits.iter().map(|m| m.memory_id).collect();
     let survived = acked.iter().filter(|(id, _)| ids.contains(id)).count();
     let _ = client.close().await;
     Ok(survived)
 }
 
-fn client_config(agent_id: [u8; 16]) -> ClientConfig {
-    ClientConfig {
-        agent_id,
-        ..ClientConfig::default()
-    }
+fn client_config(token: &str) -> ClientConfig {
+    ClientConfig::new(Auth::Token(token.as_bytes().to_vec()))
 }
 
 /// An ENCODE with a fresh request id (every call writes a real row).

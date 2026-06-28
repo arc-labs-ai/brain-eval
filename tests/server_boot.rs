@@ -31,6 +31,7 @@ async fn start_docker_boots_a_usable_server() {
         container_name: "brain-eval-boot-test".to_string(),
         data_port: 28080,
         metrics_port: 29091,
+        admin_port: 29092,
         health_timeout: Duration::from_secs(180),
         ..DockerServerOpts::default()
     };
@@ -40,9 +41,12 @@ async fn start_docker_boots_a_usable_server() {
         .expect("server should boot and become healthy");
 
     // Drive a real round-trip through the harness against the booted server.
-    let harness = BrainEvalHarness::connect(server.endpoint())
-        .await
-        .expect("connect to booted server");
+    // Mint a data-plane key through the booted server's admin plane.
+    let agent_id = brain_db_sdk::new_id();
+    let harness =
+        BrainEvalHarness::connect_minted(&server.key_minter(), server.endpoint(), agent_id)
+            .await
+            .expect("connect to booted server");
 
     let request =
         brain_db_sdk::EncodeBuilder::new("the sky over Lisbon turned amber at dusk").build();

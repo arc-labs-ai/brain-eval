@@ -46,8 +46,9 @@ use brain_db_sdk::wire::types::{
     RelationCreateRequest, RetrieverSelectionWire, StatementCreateRequest, StatementKindWire,
     StatementObjectWire, StatementValueWire,
 };
-use brain_db_sdk::{new_id, BrainClient, BrainError, ClientConfig, EncodeBuilder};
+use brain_db_sdk::{new_id, Auth, BrainClient, BrainError, ClientConfig, EncodeBuilder};
 
+use crate::run::auth::KeyMinter;
 use crate::run::harness::HarnessError;
 
 /// Built-in `Person` entity type id (seeded `brain:` schema).
@@ -285,10 +286,14 @@ fn yn(b: bool) -> &'static str {
 /// Per-verb failures are folded into the report (never aborting the run),
 /// so the `Result` is always `Ok`; the signature is kept for API symmetry.
 pub async fn run_concurrent_throughput(
+    minter: &KeyMinter,
     endpoint: SocketAddr,
     cfg: &ConcurrentConfig,
 ) -> Result<ConcurrentReport, HarnessError> {
+    // All connections share one agent (one shard slice), so they all present
+    // the same minted token.
     let agent_id = new_id();
+    let token = minter.mint(agent_id).await?;
     let mut results = Vec::with_capacity(cfg.verbs.len());
     for (i, verb) in cfg.verbs.iter().enumerate() {
         // Let the shard drain the previous verb's in-flight work (notably a
@@ -296,7 +301,7 @@ pub async fn run_concurrent_throughput(
         if i > 0 {
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
-        results.push(measure_verb(endpoint, agent_id, *verb, cfg).await);
+        results.push(measure_verb(endpoint, &token, *verb, cfg).await);
     }
     Ok(ConcurrentReport { results })
 }
@@ -342,11 +347,11 @@ impl Prepared {
 /// error or timeout) rather than aborting the whole run.
 async fn measure_verb(
     endpoint: SocketAddr,
-    agent_id: [u8; 16],
+    token: &str,
     verb: TputVerb,
     cfg: &ConcurrentConfig,
 ) -> VerbThroughput {
-    let setup = match connect(endpoint, agent_id).await {
+    let setup = match connect(endpoint, token).await {
         Ok(c) => c,
         Err(e) => return verb_setup_failed(verb, cfg.clients, &e),
     };
@@ -365,7 +370,8 @@ async fn measure_verb(
     let mut set = tokio::task::JoinSet::new();
     for w in 0..cfg.clients {
         let plan = prepared.for_worker(w);
-        set.spawn(async move { worker_loop(endpoint, agent_id, plan, deadline).await });
+        let token = token.to_owned();
+        set.spawn(async move { worker_loop(endpoint, token, plan, deadline).await });
     }
 
     let mut ops = 0u64;
@@ -504,12 +510,12 @@ impl WorkerStat {
 /// One worker: own connection, hammer the verb until the deadline.
 async fn worker_loop(
     endpoint: SocketAddr,
-    agent_id: [u8; 16],
+    token: String,
     plan: WorkerPlan,
     deadline: Instant,
 ) -> WorkerStat {
     let mut stat = WorkerStat::default();
-    let client = match connect(endpoint, agent_id).await {
+    let client = match connect(endpoint, &token).await {
         Ok(c) => c,
         Err(e) => {
             stat.record_err(&e);
@@ -618,12 +624,9 @@ fn is_timeout(e: &BrainError) -> bool {
 
 /// Connect a fresh client bound to `agent_id`, with the generous load
 /// request timeout.
-async fn connect(endpoint: SocketAddr, agent_id: [u8; 16]) -> Result<BrainClient, BrainError> {
-    let config = ClientConfig {
-        agent_id,
-        request_timeout: Some(REQUEST_TIMEOUT),
-        ..ClientConfig::default()
-    };
+async fn connect(endpoint: SocketAddr, token: &str) -> Result<BrainClient, BrainError> {
+    let mut config = ClientConfig::new(Auth::Token(token.as_bytes().to_vec()));
+    config.request_timeout = Some(REQUEST_TIMEOUT);
     BrainClient::connect_with(endpoint, config).await
 }
 

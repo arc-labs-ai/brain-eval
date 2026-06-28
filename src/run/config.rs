@@ -5,6 +5,11 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
+use crate::run::auth::{
+    KeyMinter, DEFAULT_ADMIN_PORT, DEFAULT_NAMESPACE, ENV_ADMIN_PORT, ENV_ADMIN_SECRET,
+    ENV_NAMESPACE,
+};
+
 /// Output format selector.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReporterKind {
@@ -49,6 +54,16 @@ pub struct RunConfig {
     /// store — read-path iteration with no write cost.
     /// `BRAIN_EVAL_READ_ONLY_AGENTS`.
     pub read_only_agents: Option<PathBuf>,
+    /// Tenant namespace minted data-plane keys bind to. `BRAIN_EVAL_NAMESPACE`,
+    /// default `eval`.
+    pub namespace: String,
+    /// Admin bearer secret for minting data-plane keys against the endpoint's
+    /// admin plane. `BRAIN_EVAL_ADMIN_SECRET`. `None` ⇒ minting unavailable
+    /// (only meaningful against an external server the operator gated).
+    pub admin_secret: Option<String>,
+    /// Admin listener port on the endpoint host. `BRAIN_EVAL_ADMIN_PORT`,
+    /// default `9092`.
+    pub admin_port: u16,
 }
 
 impl RunConfig {
@@ -64,7 +79,21 @@ impl RunConfig {
             question_types: None,
             persist_agents: None,
             read_only_agents: None,
+            namespace: DEFAULT_NAMESPACE.to_string(),
+            admin_secret: None,
+            admin_port: DEFAULT_ADMIN_PORT,
         }
+    }
+
+    /// A [`KeyMinter`] for this run's endpoint, namespace, and admin plane.
+    /// Used to mint per-agent data-plane keys before connecting.
+    #[must_use]
+    pub fn key_minter(&self) -> KeyMinter {
+        KeyMinter::new(
+            format!("http://{}:{}", self.endpoint.ip(), self.admin_port),
+            self.admin_secret.clone().unwrap_or_default(),
+            self.namespace.clone(),
+        )
     }
 
     /// Build a config from env vars (`BRAIN_EVAL_ENDPOINT`,
@@ -129,6 +158,16 @@ impl RunConfig {
             .filter(|s| !s.is_empty())
             .map(PathBuf::from);
 
+        let namespace =
+            std::env::var(ENV_NAMESPACE).unwrap_or_else(|_| DEFAULT_NAMESPACE.to_string());
+        let admin_secret = std::env::var(ENV_ADMIN_SECRET)
+            .ok()
+            .filter(|s| !s.is_empty());
+        let admin_port = std::env::var(ENV_ADMIN_PORT)
+            .ok()
+            .and_then(|p| p.parse::<u16>().ok())
+            .unwrap_or(DEFAULT_ADMIN_PORT);
+
         Ok(Self {
             endpoint,
             max_questions,
@@ -138,6 +177,9 @@ impl RunConfig {
             question_types,
             persist_agents,
             read_only_agents,
+            namespace,
+            admin_secret,
+            admin_port,
         })
     }
 

@@ -36,6 +36,7 @@ async fn concurrent_throughput_no_errors() {
         container_name: "brain-eval-throughput".to_string(),
         data_port: 38081,
         metrics_port: 39092,
+        admin_port: 39093,
         health_timeout: Duration::from_secs(180),
         ..DockerServerOpts::default()
     };
@@ -53,7 +54,7 @@ async fn concurrent_throughput_no_errors() {
         ..ConcurrentConfig::default()
     };
 
-    let report = run_concurrent_throughput(server.endpoint(), &cfg).await;
+    let report = run_concurrent_throughput(&server.key_minter(), server.endpoint(), &cfg).await;
     server.stop().await;
 
     let report = report.expect("concurrent throughput run should complete");

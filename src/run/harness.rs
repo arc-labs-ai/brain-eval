@@ -22,9 +22,17 @@ use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
 use brain_db_sdk::wire::types::{AnswerKindWire, MemoryResult, WireMemoryId, WireUuid};
-use brain_db_sdk::{BrainClient, BrainError, ClientConfig, EncodeBuilder, RecallBuilder};
+use brain_db_sdk::{Auth, BrainClient, BrainError, ClientConfig, EncodeBuilder, RecallBuilder};
 
 use crate::core::instance::TurnRecord;
+use crate::run::auth::{KeyMinter, MintError};
+
+/// Generous per-request deadline. The eval write path triggers full
+/// server-side extraction (pattern + LLM) on a CPU-only dev box, where a
+/// single ENCODE can far exceed the SDK's 30s default. A short deadline fails
+/// the whole session on one slow turn (the dreaded INGEST-FAIL); this gives
+/// ingest headroom so latency, not a timeout, is what we measure.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// Errors surfaced by the harness.
 #[derive(Debug, thiserror::Error)]
@@ -33,6 +41,9 @@ pub enum HarnessError {
     /// The underlying SDK client returned an error.
     #[error("brain-db-sdk error: {0}")]
     Sdk(#[from] BrainError),
+    /// Minting a data-plane key failed.
+    #[error("key mint failed: {0}")]
+    Mint(#[from] MintError),
 }
 
 /// One driver bound to one agent.
@@ -46,29 +57,49 @@ pub struct BrainEvalHarness {
 }
 
 impl BrainEvalHarness {
-    /// Open a fresh connection with a fresh agent id. Drives the
+    /// Open a fresh connection with a fresh agent id, minting its data-plane
+    /// key against an external server's admin plane (resolved from the
+    /// environment — see [`KeyMinter::from_external_env`]). Drives the
     /// HELLO → WELCOME → AUTH → AUTH_OK handshake before returning.
     pub async fn connect(addr: SocketAddr) -> Result<Self, HarnessError> {
         let agent_id = brain_db_sdk::new_id();
         Self::connect_with_agent(addr, agent_id).await
     }
 
-    /// Connect with an explicit agent id (useful for tests asserting
-    /// isolation, or for resuming an existing eval scope).
+    /// Connect with an explicit agent id against an external server, minting
+    /// its key from the environment. For a server the eval owns, prefer
+    /// [`connect_minted`](Self::connect_minted) with the handle's
+    /// [`KeyMinter`].
     pub async fn connect_with_agent(
         addr: SocketAddr,
         agent_id: WireUuid,
     ) -> Result<Self, HarnessError> {
-        // The eval write path triggers full server-side extraction
-        // (pattern + LLM) on a CPU-only dev box, where a single ENCODE can
-        // far exceed the SDK's 30s default. A short deadline fails the whole
-        // session on one slow turn (the dreaded INGEST-FAIL); give ingest
-        // generous headroom so latency, not a timeout, is what we measure.
-        let config = ClientConfig {
-            agent_id,
-            request_timeout: Some(Duration::from_secs(300)),
-            ..ClientConfig::default()
-        };
+        let minter = KeyMinter::from_external_env(addr);
+        Self::connect_minted(&minter, addr, agent_id).await
+    }
+
+    /// Mint a data-plane key for `agent_id` through `minter`, then connect
+    /// with it. The agent id is what the key is minted *for* — it rides the
+    /// token, not the client config (Brain assigns identity from auth).
+    pub async fn connect_minted(
+        minter: &KeyMinter,
+        addr: SocketAddr,
+        agent_id: WireUuid,
+    ) -> Result<Self, HarnessError> {
+        let token = minter.mint(agent_id).await?;
+        Self::connect_with_token(addr, agent_id, token).await
+    }
+
+    /// Connect with an already-minted token. The credential is the
+    /// connection's whole identity; `agent_id` is retained only so callers
+    /// can correlate the harness with the agent its key was minted for.
+    pub async fn connect_with_token(
+        addr: SocketAddr,
+        agent_id: WireUuid,
+        token: String,
+    ) -> Result<Self, HarnessError> {
+        let mut config = ClientConfig::new(Auth::Token(token.into_bytes()));
+        config.request_timeout = Some(REQUEST_TIMEOUT);
         let client = BrainClient::connect_with(addr, config).await?;
         Ok(Self { client, agent_id })
     }
@@ -136,11 +167,7 @@ impl BrainEvalHarness {
     /// (`None`, an honest abstention). `max_results` is a safety cap on
     /// the returned set size — not a ranking knob; the answer's shape
     /// comes from the stored data, never from this count.
-    pub async fn recall(
-        &self,
-        cue: &str,
-        max_results: u32,
-    ) -> Result<RecallOutcome, HarnessError> {
+    pub async fn recall(&self, cue: &str, max_results: u32) -> Result<RecallOutcome, HarnessError> {
         let start = Instant::now();
         let request = RecallBuilder::new(cue)
             .max_results(max_results)

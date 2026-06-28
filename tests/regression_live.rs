@@ -26,7 +26,7 @@
 
 use std::time::Duration;
 
-use brain_db_sdk::{BrainClient, ClientConfig};
+use brain_db_sdk::{Auth, BrainClient, ClientConfig};
 use brain_eval::run::server::{DockerServerOpts, ServerHandle};
 use brain_eval::scale::{no_regression, run_recall_quality, RecallQualityReport, RecallTargets};
 
@@ -51,6 +51,7 @@ async fn recall_quality_no_regression() {
         container_name: "brain-eval-regression".to_string(),
         data_port: 38086,
         metrics_port: 39097,
+        admin_port: 39098,
         health_timeout: Duration::from_secs(180),
         ..DockerServerOpts::default()
     };
@@ -60,10 +61,14 @@ async fn recall_quality_no_regression() {
         .expect("full-stack server should boot and become healthy");
 
     let current = {
-        let config = ClientConfig {
-            request_timeout: Some(REQUEST_TIMEOUT),
-            ..ClientConfig::default()
-        };
+        // Mint a data-plane key through the booted server's admin plane.
+        let token = server
+            .key_minter()
+            .mint(brain_db_sdk::new_id())
+            .await
+            .expect("mint data-plane key");
+        let mut config = ClientConfig::new(Auth::Token(token.into_bytes()));
+        config.request_timeout = Some(REQUEST_TIMEOUT);
         let client = BrainClient::connect_with(server.endpoint(), config)
             .await
             .expect("connect");

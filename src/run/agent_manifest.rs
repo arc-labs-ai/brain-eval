@@ -32,6 +32,8 @@ pub struct AgentManifest {
 }
 
 impl AgentManifest {
+    /// A new, empty manifest tagged with the benchmark id and endpoint it
+    /// was produced against.
     #[must_use]
     pub fn new(benchmark: impl Into<String>, endpoint: impl Into<String>) -> Self {
         Self {
@@ -43,7 +45,8 @@ impl AgentManifest {
 
     /// Record the agent a conversation's haystack was ingested under.
     pub fn record(&mut self, conversation_key: &str, agent: WireUuid) {
-        self.agents.insert(conversation_key.to_owned(), hex16(&agent));
+        self.agents
+            .insert(conversation_key.to_owned(), hex16(&agent));
     }
 
     /// The agent id for a conversation key, if recorded and well-formed.
@@ -52,11 +55,13 @@ impl AgentManifest {
         self.agents.get(conversation_key).and_then(|h| unhex16(h))
     }
 
+    /// Number of conversations recorded.
     #[must_use]
     pub fn len(&self) -> usize {
         self.agents.len()
     }
 
+    /// Whether no conversations are recorded.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.agents.is_empty()
@@ -134,8 +139,10 @@ mod tests {
 
     #[test]
     fn manifest_save_load_round_trip() {
-        let path = std::env::temp_dir()
-            .join(format!("brain_eval_agents_test_{}.json", std::process::id()));
+        let path = std::env::temp_dir().join(format!(
+            "brain_eval_agents_test_{}.json",
+            std::process::id()
+        ));
         let mut m = AgentManifest::new("locomo", "127.0.0.1:18080");
         m.record("conv-a", [1u8; 16]);
         m.record("conv-b", [2u8; 16]);

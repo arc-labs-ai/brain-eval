@@ -25,12 +25,13 @@ use crate::report::baselines::CompetitorBaselines;
 use crate::report::format::{json::JsonReporter, text::TextReporter, Reporter};
 use crate::report::shape::{BenchmarkMeta, BenchmarkReport};
 use crate::run::agent_manifest::AgentManifest;
+use crate::run::auth::KeyMinter;
 use crate::run::config::{ReporterKind, RunConfig};
-use crate::run::harness::{BrainEvalHarness, RecallOutcome};
+use crate::run::harness::{BrainEvalHarness, HarnessError, RecallOutcome};
 use crate::run::synthesize::synthesize_answer;
-use brain_db_sdk::wire::types::AnswerKindWire;
 use crate::score::judge::judge_answer_heuristic;
 use crate::score::metrics::compute_full_metrics;
+use brain_db_sdk::wire::types::AnswerKindWire;
 
 /// Drives a benchmark to completion and produces a [`BenchmarkReport`].
 pub struct EvalRunner {
@@ -226,9 +227,17 @@ impl EvalRunner {
         };
         // Persist mode: record each conversation's agent id so a later
         // read-only run can reuse it. Only meaningful on an ingesting run.
-        let mut persist = self.config.persist_agents.as_ref().map(|_| {
-            AgentManifest::new(benchmark.id(), self.config.endpoint.to_string())
-        });
+        let mut persist = self
+            .config
+            .persist_agents
+            .as_ref()
+            .map(|_| AgentManifest::new(benchmark.id(), self.config.endpoint.to_string()));
+
+        // One minter for the whole run; mint a data-plane key per agent and
+        // cache it so a reconnect of the same agent reuses its token rather
+        // than minting a fresh one each time.
+        let minter = self.config.key_minter();
+        let mut tokens: BTreeMap<[u8; 16], String> = BTreeMap::new();
 
         for (conv_key, idxs) in &groups {
             // Establish the harness and decide whether to ingest. Read-only
@@ -236,14 +245,14 @@ impl EvalRunner {
             // otherwise mint a fresh agent, ingest once, and (if persisting)
             // record the agent for future read-only reuse.
             #[allow(clippy::type_complexity)]
-            let (harness, write_latency_ms, write_attempted, write_stored, write_deduplicated, ingest_err): (
-                BrainEvalHarness,
-                u64,
-                u64,
-                u64,
-                u64,
-                bool,
-            ) = if let Some(manifest) = &read_only {
+            let (
+                harness,
+                write_latency_ms,
+                write_attempted,
+                write_stored,
+                write_deduplicated,
+                ingest_err,
+            ): (BrainEvalHarness, u64, u64, u64, u64, bool) = if let Some(manifest) = &read_only {
                 let Some(agent) = manifest.agent_for(conv_key) else {
                     warn!(
                         conversation = %conv_key,
@@ -260,7 +269,14 @@ impl EvalRunner {
                     }
                     continue;
                 };
-                match BrainEvalHarness::connect_with_agent(self.config.endpoint, agent).await {
+                let reconnect = match mint_or_cached(&minter, &mut tokens, agent).await {
+                    Ok(token) => {
+                        BrainEvalHarness::connect_with_token(self.config.endpoint, agent, token)
+                            .await
+                    }
+                    Err(e) => Err(e),
+                };
+                match reconnect {
                     Ok(h) => (h, 0, 0, 0, 0, false),
                     Err(e) => {
                         warn!(conversation = %conv_key, error = %e, "read-only: reconnect failed; recording group as failed");
@@ -277,7 +293,16 @@ impl EvalRunner {
                     }
                 }
             } else {
-                let harness = match BrainEvalHarness::connect(self.config.endpoint).await {
+                // Fresh agent for this conversation: mint its key, connect.
+                let agent_id = brain_db_sdk::new_id();
+                let connect = match mint_or_cached(&minter, &mut tokens, agent_id).await {
+                    Ok(token) => {
+                        BrainEvalHarness::connect_with_token(self.config.endpoint, agent_id, token)
+                            .await
+                    }
+                    Err(e) => Err(e),
+                };
+                let harness = match connect {
                     Ok(h) => h,
                     Err(e) => {
                         warn!(
@@ -329,7 +354,9 @@ impl EvalRunner {
                     );
                     wait_for_write_flush(&url, conv_key).await;
                 }
-                (harness, outcome.0, outcome.1, outcome.2, outcome.3, outcome.4)
+                (
+                    harness, outcome.0, outcome.1, outcome.2, outcome.3, outcome.4,
+                )
             };
 
             // ---- per-question retrieval + judging ----
@@ -565,6 +592,22 @@ impl IncrementalTracker {
     }
 }
 
+/// Get the cached data-plane token for `agent_id`, minting (and caching) a
+/// fresh one on first use. Caching keeps a reconnect of the same agent on the
+/// same key instead of minting a new one each time.
+async fn mint_or_cached(
+    minter: &KeyMinter,
+    tokens: &mut BTreeMap<[u8; 16], String>,
+    agent_id: [u8; 16],
+) -> Result<String, HarnessError> {
+    if let Some(t) = tokens.get(&agent_id) {
+        return Ok(t.clone());
+    }
+    let token = minter.mint(agent_id).await?;
+    tokens.insert(agent_id, token.clone());
+    Ok(token)
+}
+
 /// Resolve the datasets directory from `BRAIN_EVAL_DATASETS_DIR`.
 #[must_use]
 pub fn datasets_dir() -> Option<PathBuf> {
@@ -652,7 +695,12 @@ fn answer_kind_tag(kind: AnswerKindWire) -> &'static str {
 /// the flag — `FLAG=0` and `FLAG=false` keep the default behaviour.
 fn env_truthy(var: &str) -> bool {
     std::env::var(var)
-        .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        .map(|v| {
+            matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
         .unwrap_or(false)
 }
 
@@ -727,7 +775,11 @@ async fn fetch_counter_sum(client: &reqwest::Client, url: &str, metric: &str) ->
         if line.starts_with('#') || !line.starts_with(metric) {
             continue;
         }
-        if let Some(v) = line.rsplit(' ').next().and_then(|v| v.trim().parse::<f64>().ok()) {
+        if let Some(v) = line
+            .rsplit(' ')
+            .next()
+            .and_then(|v| v.trim().parse::<f64>().ok())
+        {
             sum += v as i64;
         }
     }

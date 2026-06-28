@@ -73,7 +73,7 @@ async fn run(
     // Ingest n memories under one agent (one shard slice).
     let agent_id = brain_db_sdk::new_id();
     {
-        let h = BrainEvalHarness::connect_with_agent(server.endpoint(), agent_id)
+        let h = BrainEvalHarness::connect_minted(&server.key_minter(), server.endpoint(), agent_id)
             .await
             .map_err(|e| format!("connect: {e}"))?;
         for i in 0..n {
