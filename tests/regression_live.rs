@@ -2,7 +2,7 @@
 //!
 //! Boots the production image, measures known-answer recall@1 / recall@K,
 //! and compares against the committed baseline
-//! (`baselines/recall_quality.txt`). A drop of more than `TOLERANCE` below
+//! (`tests/baselines/recall_quality.txt`). A drop of more than `TOLERANCE` below
 //! the baseline on either metric fails the build — this is the perf/recall
 //! regression gate the CI live tier runs.
 //!
@@ -27,10 +27,15 @@
 use std::time::Duration;
 
 use brain_db_sdk::{Auth, BrainClient, ClientConfig};
-use brain_eval::run::server::{DockerServerOpts, ServerHandle};
-use brain_eval::scale::{no_regression, run_recall_quality, RecallQualityReport, RecallTargets};
+use brain_eval::blackbox::scale::{
+    no_regression, run_recall_quality, RecallQualityReport, RecallTargets,
+};
+use brain_eval::client::server::{DockerServerOpts, ServerHandle};
 
-const BASELINE_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/baselines/recall_quality.txt");
+const BASELINE_PATH: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/baselines/recall_quality.txt"
+);
 /// Allowed absolute drop below baseline before the gate fails. Wide enough
 /// to absorb the reranker's run-to-run recall@1 jitter at the smoke N, so a
 /// real recall collapse is what trips it — not noise.

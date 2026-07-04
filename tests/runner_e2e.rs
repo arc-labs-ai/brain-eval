@@ -18,9 +18,9 @@
 
 use std::net::SocketAddr;
 
-use brain_eval::datasets::smoke::SmokeBenchmark;
-use brain_eval::report::smoke_competitor_baselines;
-use brain_eval::run::{EvalRunner, ReporterKind, RunConfig};
+use brain_eval::bench::datasets::smoke::SmokeBenchmark;
+use brain_eval::bench::report::smoke_competitor_baselines;
+use brain_eval::bench::{EvalRunner, ReporterKind, RunConfig};
 
 fn endpoint() -> Option<SocketAddr> {
     std::env::var("BRAIN_EVAL_ENDPOINT")

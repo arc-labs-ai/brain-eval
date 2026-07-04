@@ -17,8 +17,8 @@
 
 use std::time::Duration;
 
-use brain_eval::run::harness::BrainEvalHarness;
-use brain_eval::run::server::{DockerServerOpts, ServerHandle};
+use brain_eval::client::harness::BrainEvalHarness;
+use brain_eval::client::server::{DockerServerOpts, ServerHandle};
 
 #[tokio::test]
 #[ignore = "requires docker + a brain:<tag> image + the BGE model on disk"]

@@ -16,8 +16,8 @@ use std::collections::BTreeSet;
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use brain_eval::core::instance::TurnRecord;
-use brain_eval::run::harness::BrainEvalHarness;
+use brain_eval::bench::core::instance::TurnRecord;
+use brain_eval::client::harness::BrainEvalHarness;
 
 fn endpoint() -> SocketAddr {
     std::env::var("BRAIN_EVAL_ENDPOINT")

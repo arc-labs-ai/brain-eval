@@ -4,7 +4,7 @@ version = "1.0.0"
 edition = "2021"
 rust-version = "1.95"
 license = "Apache-2.0"
-repository = "https://github.com/brain-db-io/brain-eval"
+repository = "https://github.com/arc-labs-ai/brain-eval"
 description = "Evaluation, benchmarking, and report generation for Brain — the cognitive substrate for AI agents."
 
 [features]
@@ -31,6 +31,16 @@ live-llm = []
 # checkout for local co-development, so this repo builds standalone (from
 # crates.io, once published) and in the side-by-side layout (from the
 # path) without edits. Same pattern brain-shell uses.
+#
+# STATUS (checked against the crates.io API — a GET on
+# /api/v1/crates/brain-db-sdk currently 404s): brain-db-sdk is NOT yet
+# published. The only way this repo builds today is via the
+# `[patch.crates-io]` sibling checkout below — CI's `check` job always
+# checks out `../brain-sdk` for exactly this reason, so the "pure
+# crates.io" path is untested and will fail for anyone who clones this
+# repo alone without the sibling checkout. Once brain-sdk publishes 0.1.0,
+# drop this note; until then, treat the `[patch]` block as load-bearing,
+# not optional.
 # ----------------------------------------------------------------------------
 
 [dependencies]
@@ -42,6 +52,11 @@ serde_json = "1"
 uuid = { version = "1.7", features = ["v7", "serde"] }
 thiserror = "1"
 tracing = "0.1"
+# The binary installs this at startup so tracing:: calls actually reach
+# stderr instead of being silently dropped by the default no-op
+# dispatcher. RUST_LOG-controlled (defaults to "info" — see
+# src/bin/brain-eval.rs::init_tracing).
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Pins the judge prompt into the report: BenchmarkMeta records the
 # sha256 of the rendered judge template so a silent prompt edit can't

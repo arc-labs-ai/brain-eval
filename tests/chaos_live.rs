@@ -18,8 +18,8 @@
 
 use std::time::Duration;
 
-use brain_eval::run::server::{remove_volume, DockerServerOpts};
-use brain_eval::system::kill_during_write;
+use brain_eval::blackbox::system::kill_during_write;
+use brain_eval::client::server::{remove_volume, DockerServerOpts};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires docker + a brain:<tag> image + the brain-models volume"]

@@ -19,8 +19,8 @@
 
 use std::time::Duration;
 
-use brain_eval::run::server::{remove_volume, DockerServerOpts};
-use brain_eval::system::storage_footprint;
+use brain_eval::blackbox::system::storage_footprint;
+use brain_eval::client::server::{remove_volume, DockerServerOpts};
 
 #[tokio::test]
 #[ignore = "requires docker + a brain:<tag> image + the brain-models volume"]

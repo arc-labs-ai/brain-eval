@@ -10,7 +10,7 @@
 
 #![cfg(not(miri))]
 
-use brain_eval::system::run_core_scenarios;
+use brain_eval::blackbox::system::run_core_scenarios;
 
 fn endpoint() -> std::net::SocketAddr {
     std::env::var("BRAIN_EVAL_ENDPOINT")

@@ -6,7 +6,7 @@
 #
 # Assumes the layout:
 #
-#   brain-db-io/
+#   arc-labs-ai/
 #   ├── brain-sdk/                   # the SDK source (this repo's git dep)
 #   │   └── rust/                    # the brain-db-sdk crate
 #   └── brain-eval/                  # ← you are here

@@ -14,6 +14,12 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# Least-privilege default: both jobs only ever check out code (the `live`
+# job's cross-repo checkouts use their own explicit token). Neither needs
+# to write anything back to GitHub.
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -23,6 +29,7 @@ jobs:
   # brain-server and run in the `live` job.
   check:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       # brain-eval depends on the SDK via `[patch.crates-io] brain-db-sdk =
       # { path = "../brain-sdk/rust" }`, so the sibling SDK must sit at
@@ -34,7 +41,7 @@ jobs:
       - name: Checkout brain-sdk (sibling, for the [patch] path)
         uses: actions/checkout@v4
         with:
-          repository: brain-db-io/brain-sdk
+          repository: arc-labs-ai/brain-sdk
           path: brain-sdk
 
       - name: Install Rust
@@ -75,6 +82,7 @@ jobs:
         || github.event_name == 'workflow_dispatch'
         || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
       - name: Checkout brain-eval
         uses: actions/checkout@v4
@@ -83,7 +91,7 @@ jobs:
       - name: Checkout brain-sdk (sibling)
         uses: actions/checkout@v4
         with:
-          repository: brain-db-io/brain-sdk
+          repository: arc-labs-ai/brain-sdk
           path: brain-sdk
       # The server image is built from the brain repo's Dockerfile. If brain
       # is private, set a repo-scoped PAT in the `BRAIN_REPO_TOKEN` secret;
@@ -91,7 +99,7 @@ jobs:
       - name: Checkout brain (server, for the image build + model bootstrap)
         uses: actions/checkout@v4
         with:
-          repository: brain-db-io/brain
+          repository: arc-labs-ai/brain-db
           path: brain
           token: ${{ secrets.BRAIN_REPO_TOKEN || github.token }}
 

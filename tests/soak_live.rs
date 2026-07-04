@@ -17,8 +17,8 @@
 
 use std::time::Duration;
 
-use brain_eval::run::server::{DockerServerOpts, ServerHandle};
-use brain_eval::soak::{run_soak, SoakConfig};
+use brain_eval::blackbox::soak::{run_soak, SoakConfig};
+use brain_eval::client::server::{DockerServerOpts, ServerHandle};
 
 #[tokio::test]
 #[ignore = "requires docker + a brain:<tag> image + the brain-models volume"]

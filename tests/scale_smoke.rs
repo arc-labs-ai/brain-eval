@@ -16,8 +16,8 @@
 
 #![cfg(not(miri))]
 
-use brain_eval::run::harness::BrainEvalHarness;
-use brain_eval::scale::{run_scale, ScaleConfig, Targets};
+use brain_eval::blackbox::scale::{run_scale, ScaleConfig, Targets};
+use brain_eval::client::harness::BrainEvalHarness;
 
 fn endpoint() -> std::net::SocketAddr {
     std::env::var("BRAIN_EVAL_ENDPOINT")

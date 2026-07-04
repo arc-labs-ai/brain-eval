@@ -24,8 +24,8 @@
 
 use std::time::Duration;
 
-use brain_eval::run::server::{DockerServerOpts, ServerHandle};
-use brain_eval::scale::{run_concurrent_throughput, ConcurrentConfig};
+use brain_eval::blackbox::scale::{run_concurrent_throughput, ConcurrentConfig};
+use brain_eval::client::server::{DockerServerOpts, ServerHandle};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires docker + a brain:<tag> image + the brain-models volume"]

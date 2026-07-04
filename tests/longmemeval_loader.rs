@@ -13,9 +13,9 @@
 
 use std::path::PathBuf;
 
-use brain_eval::core::benchmark::Benchmark;
-use brain_eval::core::instance::QuestionType;
-use brain_eval::datasets::longmemeval::LongMemEvalS;
+use brain_eval::bench::core::benchmark::Benchmark;
+use brain_eval::bench::core::instance::QuestionType;
+use brain_eval::bench::datasets::longmemeval::LongMemEvalS;
 
 /// Stage the smoke fixture under a temp `BRAIN_EVAL_DATASETS_DIR`-shaped
 /// directory and return the path. Each test gets its own temp dir.

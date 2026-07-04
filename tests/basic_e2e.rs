@@ -13,10 +13,10 @@
 
 use std::net::SocketAddr;
 
-use brain_eval::core::instance::{EvalInstance, QuestionType, Session, TurnRecord};
-use brain_eval::core::outcome::Verdict;
-use brain_eval::run::harness::BrainEvalHarness;
-use brain_eval::score::judge::judge_answer_heuristic;
+use brain_eval::bench::core::instance::{EvalInstance, QuestionType, Session, TurnRecord};
+use brain_eval::bench::core::outcome::Verdict;
+use brain_eval::bench::score::judge::judge_answer_heuristic;
+use brain_eval::client::harness::BrainEvalHarness;
 
 /// Three deterministic single-hop fact-retrieval instances. Local to
 /// this integration test — the production library ships no test

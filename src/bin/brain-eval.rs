@@ -16,24 +16,26 @@
 use std::net::SocketAddr;
 use std::process::ExitCode;
 
-use brain_eval::acceptance::{run_acceptance, AcceptanceConfig};
-use brain_eval::core::benchmark::Benchmark;
-use brain_eval::datasets::{
+use brain_eval::bench::core::benchmark::Benchmark;
+use brain_eval::bench::datasets::{
     dmr::DmrBenchmark, lexical_stress::LexicalStressBenchmark, locomo::LocomoBenchmark,
     longmemeval::LongMemEvalS, paraphrase_stress::ParaphraseStressBenchmark, smoke::SmokeBenchmark,
     supersession_stress::SupersessionStressBenchmark,
 };
-use brain_eval::report::{
+use brain_eval::bench::report::{
     dmr_competitor_baselines, lexical_stress_competitor_baselines, locomo_competitor_baselines,
     longmemeval_s_competitor_baselines, paraphrase_stress_competitor_baselines,
     smoke_competitor_baselines, supersession_stress_competitor_baselines, CompetitorBaselines,
 };
-use brain_eval::run::{EvalRunner, RunConfig};
-use brain_eval::soak::{run_soak, SoakConfig};
+use brain_eval::bench::{EvalRunner, RunConfig};
+use brain_eval::blackbox::acceptance::{run_acceptance, AcceptanceConfig};
+use brain_eval::blackbox::soak::{run_soak, SoakConfig};
 
 const DEFAULT_ENDPOINT: &str = "127.0.0.1:9090";
 
 fn main() -> ExitCode {
+    init_tracing();
+
     let rt = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -45,6 +47,22 @@ fn main() -> ExitCode {
         }
     };
     rt.block_on(async_main())
+}
+
+/// Install the tracing subscriber. Without this, every `tracing::warn!`/
+/// `info!`/`debug!` call in the library is silently dropped by the
+/// default no-op dispatcher — this is the one place that turns those
+/// calls into actual diagnostics. Writes to stderr so it never interleaves
+/// with the report output on stdout. `RUST_LOG` controls verbosity
+/// (defaults to `info` when unset or invalid).
+fn init_tracing() {
+    use tracing_subscriber::{fmt, EnvFilter};
+
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    fmt()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr)
+        .init();
 }
 
 async fn async_main() -> ExitCode {
@@ -262,7 +280,7 @@ fn summary_cmd(rest: &[String]) -> ExitCode {
         if line.trim().is_empty() {
             continue;
         }
-        match serde_json::from_str::<brain_eval::core::outcome::QuestionResult>(line) {
+        match serde_json::from_str::<brain_eval::bench::core::outcome::QuestionResult>(line) {
             Ok(r) => results.push(r),
             Err(_) => unparseable += 1,
         }
@@ -271,7 +289,7 @@ fn summary_cmd(rest: &[String]) -> ExitCode {
         eprintln!("error: no parseable question results in {path}");
         return ExitCode::from(1);
     }
-    let metrics = brain_eval::score::metrics::compute_full_metrics(&results);
+    let metrics = brain_eval::bench::score::metrics::compute_full_metrics(&results);
     println!("=== summary :: {path} ===");
     println!(
         "parsed    : {} graded questions ({unparseable} unparseable lines skipped)",
@@ -281,7 +299,7 @@ fn summary_cmd(rest: &[String]) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-fn print_summary(report: &brain_eval::report::BenchmarkReport) {
+fn print_summary(report: &brain_eval::bench::report::BenchmarkReport) {
     println!("=== {} ===", report.meta.benchmark_name);
     print_metrics(&report.metrics);
 }
@@ -290,7 +308,7 @@ fn print_summary(report: &brain_eval::report::BenchmarkReport) {
 /// vs a set vs honest abstention — how the router actually behaves), and
 /// the committed-answer precision (the hard invariant: never confidently
 /// wrong).
-fn print_metrics(m: &brain_eval::score::metrics::EvalMetrics) {
+fn print_metrics(m: &brain_eval::bench::score::metrics::EvalMetrics) {
     println!("questions : {}", m.total_questions);
     println!(
         "accuracy  : {:.4}   ({}/{}/{} correct/partial/incorrect)",
