@@ -16,10 +16,20 @@ use std::net::SocketAddr;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
-/// A parsed `/metrics` scrape: `(family_name, value)` per sample line.
+/// A parsed `/metrics` scrape — one [`Sample`] per exposition line.
 #[derive(Debug, Clone, Default)]
 pub struct PrometheusMetrics {
-    samples: Vec<(String, f64)>,
+    samples: Vec<Sample>,
+}
+
+/// One exposition line: family name, its raw `{...}` label body (empty when
+/// unlabeled), and the value. The label body is kept so callers can sum a
+/// single tier/status series, not just the whole family.
+#[derive(Debug, Clone)]
+struct Sample {
+    name: String,
+    labels: String,
+    value: f64,
 }
 
 impl PrometheusMetrics {
@@ -59,9 +69,16 @@ impl PrometheusMetrics {
                 continue;
             };
             let lhs = line[..sp].trim();
-            let name = lhs.split('{').next().unwrap_or(lhs).trim();
+            let (name, labels) = match lhs.split_once('{') {
+                Some((n, rest)) => (n.trim(), rest.to_string()),
+                None => (lhs, String::new()),
+            };
             if !name.is_empty() {
-                samples.push((name.to_string(), value));
+                samples.push(Sample {
+                    name: name.to_string(),
+                    labels,
+                    value,
+                });
             }
         }
         Self { samples }
@@ -73,10 +90,27 @@ impl PrometheusMetrics {
     pub fn sum(&self, family: &str) -> Option<f64> {
         let mut found = false;
         let mut total = 0.0;
-        for (name, value) in &self.samples {
-            if name == family {
+        for s in &self.samples {
+            if s.name == family {
                 found = true;
-                total += value;
+                total += s.value;
+            }
+        }
+        found.then_some(total)
+    }
+
+    /// Sum every sample of `family` whose label body contains
+    /// `label_contains` (a raw substring like `tier="llm",status="ran"`).
+    /// `None` if no such sample exists — lets a caller read one tier/status
+    /// series out of a multi-labeled counter.
+    #[must_use]
+    pub fn sum_where(&self, family: &str, label_contains: &str) -> Option<f64> {
+        let mut found = false;
+        let mut total = 0.0;
+        for s in &self.samples {
+            if s.name == family && s.labels.contains(label_contains) {
+                found = true;
+                total += s.value;
             }
         }
         found.then_some(total)
@@ -87,8 +121,8 @@ impl PrometheusMetrics {
     pub fn get(&self, family: &str) -> Option<f64> {
         self.samples
             .iter()
-            .find(|(name, _)| name == family)
-            .map(|(_, v)| *v)
+            .find(|s| s.name == family)
+            .map(|s| s.value)
     }
 }
 

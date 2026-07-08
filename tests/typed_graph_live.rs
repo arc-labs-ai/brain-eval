@@ -3,7 +3,7 @@
 //! Boots the production image (E1 `ServerHandle::start_docker` → full
 //! capability stack: embed + reranker + gliner from the `brain-models`
 //! volume) and runs the typed-graph scenarios (schema / entity / statement /
-//! relation / query / extraction) against it.
+//! relation / extraction) against it.
 //!
 //! `#[ignore]`d: needs Docker + a `brain:<tag>` image + the `brain-models`
 //! volume (provisioned by brain-db's `.devcontainer/bootstrap-model.sh`). Run:

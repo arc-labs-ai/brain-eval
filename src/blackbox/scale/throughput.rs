@@ -26,12 +26,12 @@
 //! ## Timeouts are perf, not correctness
 //!
 //! A request that times out under load is a *slowness* outcome, not a
-//! server defect — on emulated hardware the cross-encoder reranker and the
-//! single-core shard executor make a concurrent QUERY blast back up, and
-//! some ops legitimately exceed the client deadline. So timeouts are
-//! counted separately and folded into the perf picture (they depress ops/s)
-//! rather than failing the correctness gate. Only a `Protocol` / `Server` /
-//! connection error — the server actually misbehaving — counts as an error.
+//! server defect — on emulated hardware the single-core shard executor can
+//! make a concurrent blast back up, and some ops legitimately exceed the
+//! client deadline. So timeouts are counted separately and folded into the
+//! perf picture (they depress ops/s) rather than failing the correctness
+//! gate. Only a `Protocol` / `Server` / connection error — the server
+//! actually misbehaving — counts as an error.
 //!
 //! Connection count note: brain-server caps `max_connections_per_ip` at 64
 //! and every eval connection shares one source IP, so the default client
@@ -42,9 +42,8 @@ use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
 use brain_db_sdk::wire::types::{
-    EntityCreateRequest, EntityResolveRequest, EvidenceRefWire, QueryRequest,
-    RelationCreateRequest, RetrieverSelectionWire, StatementCreateRequest, StatementKindWire,
-    StatementObjectWire, StatementValueWire,
+    EntityCreateRequest, EntityResolveRequest, EvidenceRefWire, RelationCreateRequest,
+    StatementCreateRequest, StatementKindWire, StatementObjectWire, StatementValueWire,
 };
 use brain_db_sdk::{new_id, Auth, BrainClient, BrainError, ClientConfig, EncodeBuilder};
 
@@ -73,8 +72,6 @@ pub enum TputVerb {
     StatementCreate,
     /// RELATION_CREATE — a `brain:related_to` edge between two entities.
     RelationCreate,
-    /// QUERY — free-text fused retrieval over a pre-ingested corpus.
-    Query,
     /// ENTITY_RESOLVE — tier-1 exact resolve of a known entity.
     EntityResolve,
 }
@@ -87,32 +84,26 @@ impl TputVerb {
             TputVerb::Encode => "encode",
             TputVerb::StatementCreate => "statement_create",
             TputVerb::RelationCreate => "relation_create",
-            TputVerb::Query => "query",
             TputVerb::EntityResolve => "entity_resolve",
         }
     }
 
-    /// Per-shard sustained ops/s floor. ENCODE and QUERY are the spec
-    /// §19/02 Throughput floors (ENCODE ≥ 5000; RECALL/QUERY ≥ 20000). The
-    /// typed-graph write verbs carry no spec *throughput* floor (only
-    /// latency targets), so their floors here are conservative
-    /// informational placeholders — the perf gate is non-binding off
-    /// reference hardware regardless.
+    /// Per-shard sustained ops/s floor. ENCODE is the spec §19/02
+    /// Throughput floor (ENCODE ≥ 5000). The typed-graph write verbs carry
+    /// no spec *throughput* floor (only latency targets), so their floors
+    /// here are conservative informational placeholders — the perf gate is
+    /// non-binding off reference hardware regardless.
     #[must_use]
     pub fn target_ops_per_sec(self) -> f64 {
         match self {
             TputVerb::Encode => 5_000.0,
-            TputVerb::Query => 20_000.0,
             TputVerb::StatementCreate => 3_000.0,
             TputVerb::RelationCreate => 2_000.0,
             TputVerb::EntityResolve => 10_000.0,
         }
     }
 
-    /// All five verbs, in a stable order. QUERY runs **last**: on slow
-    /// hardware a concurrent QUERY blast triggers a cross-encoder rerank
-    /// backlog on the single shard core that can stall the *next* verb's
-    /// setup, so it is sequenced where nothing follows it.
+    /// All four verbs, in a stable order.
     #[must_use]
     pub fn all() -> Vec<TputVerb> {
         vec![
@@ -120,7 +111,6 @@ impl TputVerb {
             TputVerb::StatementCreate,
             TputVerb::RelationCreate,
             TputVerb::EntityResolve,
-            TputVerb::Query,
         ]
     }
 }
@@ -132,8 +122,6 @@ pub struct ConcurrentConfig {
     pub clients: usize,
     /// Wall-clock window each verb is driven for.
     pub window: Duration,
-    /// Memories pre-ingested so the QUERY verb has a corpus to fuse over.
-    pub query_corpus: usize,
     /// Which verbs to measure.
     pub verbs: Vec<TputVerb>,
 }
@@ -145,7 +133,6 @@ impl Default for ConcurrentConfig {
             // headroom for the transient setup connection.
             clients: 48,
             window: Duration::from_secs(3),
-            query_corpus: 64,
             verbs: TputVerb::all(),
         }
     }
@@ -158,7 +145,6 @@ impl ConcurrentConfig {
         Self {
             clients: 16,
             window: Duration::from_millis(1500),
-            query_corpus: 32,
             verbs: TputVerb::all(),
         }
     }
@@ -296,8 +282,8 @@ pub async fn run_concurrent_throughput(
     let token = minter.mint(agent_id).await?;
     let mut results = Vec::with_capacity(cfg.verbs.len());
     for (i, verb) in cfg.verbs.iter().enumerate() {
-        // Let the shard drain the previous verb's in-flight work (notably a
-        // QUERY rerank backlog) so each verb's setup starts on a quiet shard.
+        // Let the shard drain the previous verb's in-flight work so each
+        // verb's setup starts on a quiet shard.
         if i > 0 {
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
@@ -310,7 +296,6 @@ pub async fn run_concurrent_throughput(
 #[derive(Clone)]
 enum WorkerPlan {
     Encode,
-    Query,
     Resolve(String),
     Statement([u8; 16]),
     Relation([u8; 16], [u8; 16]),
@@ -318,7 +303,7 @@ enum WorkerPlan {
 
 /// Shared per-verb setup, indexable per worker.
 enum Prepared {
-    /// No per-worker state (ENCODE, QUERY).
+    /// No per-worker state (ENCODE).
     Shared(WorkerPlan),
     /// One entity name every worker resolves (ENTITY_RESOLVE).
     Resolve(String),
@@ -441,18 +426,6 @@ async fn prepare(
     match verb {
         TputVerb::Encode => Ok(Prepared::Shared(WorkerPlan::Encode)),
 
-        TputVerb::Query => {
-            // Ingest a small corpus so the fused retrievers have signal.
-            for i in 0..cfg.query_corpus {
-                let text = format!(
-                    "Throughput corpus note {i}: the gateway team tuned warm caches and rate limits."
-                );
-                let req = EncodeBuilder::new(text.as_str()).build();
-                client.encode(&req).await?;
-            }
-            Ok(Prepared::Shared(WorkerPlan::Query))
-        }
-
         TputVerb::EntityResolve => {
             let name = format!("Resolve Target {}", short_hex(client.agent_id()));
             create_entity(client, &name).await?;
@@ -547,25 +520,6 @@ async fn run_one(client: &BrainClient, plan: &WorkerPlan, seq: u64) -> Result<()
             let text = format!("tput encode {} {seq}", short_hex(client.agent_id()));
             let req = EncodeBuilder::new(text.as_str()).build();
             client.encode(&req).await?;
-            Ok(())
-        }
-        WorkerPlan::Query => {
-            let req = QueryRequest {
-                text: "what did the gateway team tune about warm caches".to_string(),
-                entity_anchor: None,
-                kind_filter: Vec::new(),
-                predicate_filter: Vec::new(),
-                time_filter: None,
-                as_of_record_time_unix_nanos: None,
-                confidence_min: None,
-                include_tombstoned: false,
-                include_superseded: false,
-                limit: 10,
-                retrievers: RetrieverSelectionWire::Auto,
-                fusion_config: None,
-                request_id: new_id(),
-            };
-            client.query(&req).await?;
             Ok(())
         }
         WorkerPlan::Resolve(name) => {
@@ -716,7 +670,7 @@ mod tests {
         deduped.sort_unstable();
         deduped.dedup();
         assert_eq!(labels.len(), deduped.len(), "labels must be unique");
-        assert_eq!(labels.len(), 5);
+        assert_eq!(labels.len(), 4);
     }
 
     #[test]

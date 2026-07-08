@@ -16,6 +16,7 @@
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use tracing::warn;
 
@@ -25,113 +26,29 @@ use crate::bench::core::benchmark::{Benchmark, EvalError};
 use crate::bench::core::instance::{EvalInstance, QuestionType};
 use crate::bench::core::outcome::{AnswerKind, JudgeResult, QuestionResult, Verdict};
 use crate::bench::report::baselines::CompetitorBaselines;
-use crate::bench::report::format::{json::JsonReporter, text::TextReporter, Reporter};
+use crate::bench::report::format::{
+    json::JsonReporter, run_json::JsonRunReporter, text::TextReporter, Reporter,
+};
+use crate::bench::report::run_report::{
+    ConversationWrite, DrainBarrierStats, ExtractionHealth, FailStage, FailureAttribution,
+    MemoryExtraction, MemoryGraph, PlanTrace, QuestionRecord, ReadReport, RetrievedMemory,
+    RunMetadata, RunMode, RunReport, WriteReport,
+};
 use crate::bench::report::shape::{BenchmarkMeta, BenchmarkReport};
-use crate::bench::score::judge::judge_answer_heuristic;
 use crate::bench::score::metrics::compute_full_metrics;
 use crate::bench::synthesize::synthesize_answer;
 use crate::client::auth::KeyMinter;
 use crate::client::harness::{BrainEvalHarness, HarnessError, RecallOutcome};
 use crate::client::metrics::PrometheusMetrics;
-use brain_db_sdk::wire::types::AnswerKindWire;
+use brain_db_sdk::wire::types::{
+    AnswerKindWire, QueryRequest, QueryTraceRequest, RetrieverSelectionWire, WireMemoryId,
+};
+use brain_db_sdk::RecallBuilder;
 
-/// Wraps the optional `live-llm` judge behind an always-present slot, so
-/// every call site treats it uniformly instead of re-checking the feature
-/// flag. `#[cfg(feature = "live-llm")]` is confined to this type's body —
-/// `EvalRunner`'s own methods and `run()` never branch on the feature.
-struct JudgeSlot {
-    #[cfg(feature = "live-llm")]
-    judge: Option<crate::bench::score::llm_judge::LlmJudge>,
-}
+use crate::bench::score::judge::Judge;
 
-impl JudgeSlot {
-    fn from_env() -> Self {
-        Self {
-            #[cfg(feature = "live-llm")]
-            judge: crate::bench::score::llm_judge::LlmJudge::from_env(),
-        }
-    }
-
-    /// `llm:<provider>:<model>@<version>` when an LLM judge is configured,
-    /// else `"heuristic"` — reflects the judge that actually ran, not just
-    /// whether the feature is compiled in (a `live-llm` build with no
-    /// provider key still scores on the heuristic).
-    fn describe(&self) -> String {
-        #[cfg(feature = "live-llm")]
-        {
-            self.judge.as_ref().map_or_else(
-                || "heuristic".to_string(),
-                crate::bench::score::llm_judge::LlmJudge::describe,
-            )
-        }
-        #[cfg(not(feature = "live-llm"))]
-        {
-            "heuristic".to_string()
-        }
-    }
-
-    /// How many `judge` calls fell back to the heuristic grader. Always 0
-    /// without `live-llm`, or without a configured judge.
-    fn heuristic_fallback_count(&self) -> usize {
-        #[cfg(feature = "live-llm")]
-        {
-            self.judge.as_ref().map_or(
-                0,
-                crate::bench::score::llm_judge::LlmJudge::heuristic_fallback_count,
-            )
-        }
-        #[cfg(not(feature = "live-llm"))]
-        {
-            0
-        }
-    }
-
-    /// Grade one answer: the LLM judge when configured, else the heuristic.
-    async fn judge(
-        &self,
-        question_id: &str,
-        qtype: QuestionType,
-        question: &str,
-        ground_truth: &str,
-        system_answer: &str,
-    ) -> JudgeResult {
-        #[cfg(feature = "live-llm")]
-        if let Some(judge) = &self.judge {
-            return judge
-                .judge(question_id, qtype, question, ground_truth, system_answer)
-                .await;
-        }
-        #[cfg(not(feature = "live-llm"))]
-        let _ = question;
-        judge_answer_heuristic(question_id, qtype, ground_truth, system_answer)
-    }
-
-    /// Answer-supporting context recall: ask the support judge whether the
-    /// retrieved memories fully support the gold answer. `None` when no LLM
-    /// judge is configured — the support verdict needs the LLM, so a
-    /// heuristic run leaves the question unjudged rather than guessing.
-    /// Returns `(supported, reasoning)`.
-    async fn judge_support(
-        &self,
-        question: &str,
-        ground_truth: &str,
-        retrieved: &[String],
-    ) -> (Option<bool>, String) {
-        #[cfg(feature = "live-llm")]
-        if let Some(judge) = &self.judge {
-            return match judge.judge_support(question, ground_truth, retrieved).await {
-                Some(v) => (Some(v.supported), v.reasoning),
-                None => (None, String::new()),
-            };
-        }
-        #[cfg(not(feature = "live-llm"))]
-        let _ = (question, ground_truth, retrieved);
-        (None, String::new())
-    }
-}
-
-/// Wraps the optional `live-llm` answer synthesizer — same shape and
-/// rationale as [`JudgeSlot`].
+/// Wraps the optional `live-llm` answer synthesizer — the synthesis-side
+/// sibling of [`Judge`] (runner-local; only this module synthesizes).
 struct SynthSlot {
     #[cfg(feature = "live-llm")]
     synth: Option<crate::bench::synthesize::LlmSynthesizer>,
@@ -169,7 +86,7 @@ impl SynthSlot {
 pub struct EvalRunner {
     config: RunConfig,
     competitor_fn: CompetitorBaselines,
-    judge: JudgeSlot,
+    judge: Judge,
     synth: SynthSlot,
 }
 
@@ -180,7 +97,7 @@ impl EvalRunner {
         Self {
             config,
             competitor_fn,
-            judge: JudgeSlot::from_env(),
+            judge: Judge::from_env(),
             synth: SynthSlot::from_env(),
         }
     }
@@ -196,7 +113,7 @@ impl EvalRunner {
     /// Score one answer.
     async fn judge_answer(&self, instance: &EvalInstance, system_answer: &str) -> JudgeResult {
         self.judge
-            .judge(
+            .grade(
                 &instance.question_id,
                 instance.question_type,
                 &instance.question,
@@ -206,14 +123,14 @@ impl EvalRunner {
             .await
     }
 
-    /// Answer-supporting context recall — see [`JudgeSlot::judge_support`].
+    /// Answer-supporting context recall — see [`Judge::grade_support`].
     async fn judge_support(
         &self,
         instance: &EvalInstance,
         retrieved: &[String],
     ) -> (Option<bool>, String) {
         self.judge
-            .judge_support(&instance.question, &instance.answer, retrieved)
+            .grade_support(&instance.question, &instance.answer, retrieved)
             .await
     }
 
@@ -275,6 +192,14 @@ impl EvalRunner {
         }
 
         let mut question_results: Vec<QuestionResult> = Vec::with_capacity(instances.len());
+        // Exhaustive run-report accumulators, filled alongside the summary
+        // results and assembled into the `*.run.json` artifact at the end.
+        let mut conversation_writes: Vec<ConversationWrite> = Vec::new();
+        let mut question_records: Vec<QuestionRecord> = Vec::with_capacity(instances.len());
+        // The most recent drain plateau — extraction counters are cumulative
+        // and server-wide, so the last conversation's plateau is the most
+        // complete snapshot for the run.
+        let mut last_drain: Option<DrainBarrierStats> = None;
 
         // Incremental tracking: append each result to a JSONL sidecar and
         // print a running tally as we go, so an interrupted or crashed run
@@ -336,20 +261,34 @@ impl EvalRunner {
         }
         let mut tokens: BTreeMap<[u8; 16], String> = BTreeMap::new();
 
+        // Full-trace capture (default ON): per-read plan trace + graph and
+        // per-stored-memory extraction. Each adds server round-trips, so a
+        // large run can opt out with `BRAIN_EVAL_FULL_TRACE=0`. Read-only runs
+        // still capture reads; only the write-side capture is skipped there.
+        let full_trace = full_trace_enabled();
+        if !full_trace {
+            println!("eval: BRAIN_EVAL_FULL_TRACE off — skipping per-read trace/graph capture");
+        }
+
+        // Drain / extraction-health metrics endpoint — identical for every
+        // conversation, `None` when drain is opted out. Reused after the loop
+        // to scrape run-level extraction health.
+        let drain_metrics_addr: Option<SocketAddr> = if env_truthy("BRAIN_EVAL_NO_DRAIN") {
+            None
+        } else {
+            let admin_port = std::env::var("BRAIN_EVAL_DRAIN_ADMIN_PORT")
+                .ok()
+                .and_then(|p| p.parse::<u16>().ok())
+                .unwrap_or(9091);
+            Some(SocketAddr::new(self.config.endpoint.ip(), admin_port))
+        };
+
         for (conv_key, idxs) in &groups {
             // Establish the harness and decide whether to ingest. Read-only
             // reconnects to the recorded agent and skips ingest entirely;
             // otherwise mint a fresh agent, ingest once, and (if persisting)
             // record the agent for future read-only reuse.
-            #[allow(clippy::type_complexity)]
-            let (
-                harness,
-                write_latency_ms,
-                write_attempted,
-                write_stored,
-                write_deduplicated,
-                ingest_err,
-            ): (BrainEvalHarness, u64, u64, u64, u64, bool) = if let Some(manifest) = &read_only {
+            let (harness, cw): (BrainEvalHarness, ConvWrite) = if let Some(manifest) = &read_only {
                 let Some(agent) = manifest.agent_for(conv_key) else {
                     warn!(
                         conversation = %conv_key,
@@ -361,8 +300,12 @@ impl EvalRunner {
                             "read-only: no persisted agent for conversation".to_owned(),
                             /* ingest_failed = */ true,
                         );
-                        tracker.record(&r);
-                        question_results.push(r);
+                        record_failed(
+                            &mut tracker,
+                            &mut question_results,
+                            &mut question_records,
+                            r,
+                        );
                     }
                     continue;
                 };
@@ -374,7 +317,7 @@ impl EvalRunner {
                     Err(e) => Err(e),
                 };
                 match reconnect {
-                    Ok(h) => (h, 0, 0, 0, 0, false),
+                    Ok(h) => (h, ConvWrite::skipped()),
                     Err(e) => {
                         warn!(conversation = %conv_key, error = %e, "read-only: reconnect failed; recording group as failed");
                         for &idx in idxs {
@@ -383,8 +326,12 @@ impl EvalRunner {
                                 format!("read-only reconnect failed: {e}"),
                                 true,
                             );
-                            tracker.record(&r);
-                            question_results.push(r);
+                            record_failed(
+                                &mut tracker,
+                                &mut question_results,
+                                &mut question_records,
+                                r,
+                            );
                         }
                         continue;
                     }
@@ -414,8 +361,12 @@ impl EvalRunner {
                                 format!("connect failed: {e}"),
                                 /* ingest_failed = */ true,
                             );
-                            tracker.record(&r);
-                            question_results.push(r);
+                            record_failed(
+                                &mut tracker,
+                                &mut question_results,
+                                &mut question_records,
+                                r,
+                            );
                         }
                         continue;
                     }
@@ -428,7 +379,7 @@ impl EvalRunner {
 
                 // ---- ingest once ----
                 let first = &instances[idxs[0]];
-                let outcome = ingest_sessions(&harness, first).await;
+                let ingest = ingest_sessions(&harness, first).await;
 
                 // ---- wait for async write-time extraction to drain ----
                 // Brain's extractors (entity / statement / relation) run
@@ -439,35 +390,70 @@ impl EvalRunner {
                 // correct default for measurement. Set BRAIN_EVAL_NO_DRAIN
                 // to a truthy value (1/true/yes/on) to opt out and read
                 // against the live, still-settling graph.
-                if !env_truthy("BRAIN_EVAL_NO_DRAIN") {
-                    let admin_port = std::env::var("BRAIN_EVAL_DRAIN_ADMIN_PORT")
-                        .ok()
-                        .and_then(|p| p.parse::<u16>().ok())
-                        .unwrap_or(9091);
-                    let metrics_addr = SocketAddr::new(self.config.endpoint.ip(), admin_port);
-                    wait_for_write_flush(metrics_addr, conv_key).await;
-                }
-                (
-                    harness, outcome.0, outcome.1, outcome.2, outcome.3, outcome.4,
-                )
+                let drain = match drain_metrics_addr {
+                    Some(addr) => Some(wait_for_write_flush(addr, conv_key).await),
+                    None => None,
+                };
+                (harness, ConvWrite::from_ingest(ingest, drain))
             };
+
+            // Ledger the conversation's write (ingesting runs only — a
+            // read-only reconnect performed no write worth recording). The
+            // drain barrier has already settled by here, so the per-memory
+            // extraction capture reads a fully-built graph.
+            if read_only.is_none() {
+                if let Some(d) = cw.drain.clone() {
+                    last_drain = Some(d);
+                }
+                let memory_extractions = if full_trace {
+                    capture_memory_extractions(
+                        harness.client(),
+                        &cw.stored_texts,
+                        &cw.stored_ids,
+                        self.config.max_results,
+                    )
+                    .await
+                } else {
+                    Vec::new()
+                };
+                conversation_writes.push(ConversationWrite {
+                    conversation_id: conv_key.clone(),
+                    agent_id: uuid::Uuid::from_bytes(harness.agent_id())
+                        .hyphenated()
+                        .to_string(),
+                    write_latency_ms: cw.latency_ms,
+                    attempted: cw.attempted,
+                    stored: cw.stored,
+                    deduplicated: cw.deduplicated,
+                    stored_memory_ids: cw.stored_ids.iter().map(ToString::to_string).collect(),
+                    memory_extractions,
+                    ingest_failed: cw.ingest_failed,
+                });
+            }
 
             // ---- per-question retrieval + judging ----
             for &idx in idxs {
                 let inst = &instances[idx];
-                let r = self
+                let run = self
                     .run_question(
                         &harness,
                         inst,
-                        write_latency_ms,
-                        write_attempted,
-                        write_stored,
-                        write_deduplicated,
-                        ingest_err,
+                        cw.latency_ms,
+                        cw.attempted,
+                        cw.stored,
+                        cw.deduplicated,
+                        cw.ingest_failed,
+                        full_trace,
                     )
                     .await;
-                tracker.record(&r);
-                question_results.push(r);
+                tracker.record(&run.result);
+                question_records.push(QuestionRecord {
+                    result: run.result.clone(),
+                    retrieved: run.retrieved,
+                    fail_stage: run.fail_stage,
+                    plan_trace: run.plan_trace,
+                });
+                question_results.push(run.result);
             }
 
             // ---- close harness (best-effort) ----
@@ -498,9 +484,51 @@ impl EvalRunner {
 
         let metrics = compute_full_metrics(&question_results);
         let competitors = (self.competitor_fn)();
-        let report = BenchmarkReport::build(meta, metrics, competitors, question_results);
+        let report = BenchmarkReport::build(meta, metrics, competitors.clone(), question_results);
 
-        if let Err(e) = self.write_reports(&report) {
+        // ---- assemble the exhaustive run report ----
+        // Extraction health is a single run-level snapshot: the extractor
+        // counters are cumulative and server-wide, so one scrape after every
+        // conversation has drained is the most complete reading. Only on an
+        // ingesting run with a reachable metrics endpoint.
+        let extraction = if read_only.is_none() {
+            match drain_metrics_addr {
+                Some(addr) => PrometheusMetrics::scrape(addr)
+                    .await
+                    .ok()
+                    .map(|m| ExtractionHealth::from_metrics(&m)),
+                None => None,
+            }
+        } else {
+            None
+        };
+        let run_finished = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        let run_meta = RunMetadata::from_parts(
+            &report.meta,
+            &self.config,
+            RunMode::from_config(&self.config),
+            run_finished,
+        );
+        let failure_attribution = FailureAttribution::from_records(&question_records);
+        let run_report = RunReport::new(
+            run_meta,
+            WriteReport {
+                summary: report.metrics.write_quality.clone(),
+                conversations: conversation_writes,
+                extraction,
+                drain: last_drain,
+            },
+            ReadReport {
+                per_question: question_records,
+                failure_attribution,
+            },
+            report.metrics.clone(),
+            competitors,
+        );
+
+        if let Err(e) = self.write_reports(&report, &run_report) {
             warn!(error = %e, "report write failed");
         }
 
@@ -517,36 +545,54 @@ impl EvalRunner {
         write_stored: u64,
         write_deduplicated: u64,
         ingestion_failed: bool,
-    ) -> QuestionResult {
+        full_trace: bool,
+    ) -> QuestionRun {
         let recall = harness
             .recall(&instance.question, self.config.max_results)
             .await;
 
-        let (
-            answer_kind,
-            retrieved_memory_contents,
-            read_latency_ms,
-            retrieval_failed,
-            system_answer,
-        ) = match recall {
-            Ok(outcome) => {
-                let answer_kind = answer_kind_from_wire(outcome.answer_kind);
-                let retrieved: Vec<String> =
-                    outcome.memories.iter().map(|m| m.text.clone()).collect();
-                let latency = outcome.latency_ms;
-                let answer = self.synth_answer(instance, &outcome).await;
-                (answer_kind, retrieved, latency, false, answer)
-            }
-            Err(e) => {
-                warn!(
-                    question_id = %instance.question_id,
-                    error = %e,
-                    "recall failed; recording as retrieval_failed",
-                );
-                (AnswerKind::Error, Vec::new(), 0, true, String::new())
-            }
-        };
+        // Keep the FULL retrieved memories, not just their text — the run
+        // report captures every scored field the SDK returned.
+        let (answer_kind, mut retrieved, read_latency_ms, retrieval_failed, system_answer) =
+            match recall {
+                Ok(outcome) => {
+                    let answer_kind = answer_kind_from_wire(outcome.answer_kind);
+                    let retrieved: Vec<RetrievedMemory> = outcome
+                        .memories
+                        .iter()
+                        .map(RetrievedMemory::from_wire)
+                        .collect();
+                    let latency = outcome.latency_ms;
+                    let answer = self.synth_answer(instance, &outcome).await;
+                    (answer_kind, retrieved, latency, false, answer)
+                }
+                Err(e) => {
+                    warn!(
+                        question_id = %instance.question_id,
+                        error = %e,
+                        "recall failed; recording as retrieval_failed",
+                    );
+                    (AnswerKind::Error, Vec::new(), 0, true, String::new())
+                }
+            };
 
+        // Stage-level read capture (full-trace only): the server's per-stage
+        // plan/execution trace for this cue, and the extracted typed-graph per
+        // retrieved memory (a second recall with graph enrichment, matched to
+        // the measured hits by id). Both are extra round-trips, so they are
+        // gated on `BRAIN_EVAL_FULL_TRACE`; a failure warns and leaves the
+        // capture empty rather than failing the question.
+        let mut plan_trace: Option<PlanTrace> = None;
+        if full_trace && !retrieval_failed {
+            plan_trace = self.capture_plan_trace(harness, instance).await;
+            self.attach_retrieved_graph(harness, instance, &mut retrieved)
+                .await;
+        }
+
+        // The summary result carries texts only (metrics read them); the
+        // run-report record carries the full `retrieved` alongside.
+        let retrieved_memory_contents: Vec<String> =
+            retrieved.iter().map(|m| m.text.clone()).collect();
         let memories_retrieved = retrieved_memory_contents.len();
         let judged = self.judge_answer(instance, &system_answer).await;
         // Grade retrieval independently of synthesis: did Brain surface the
@@ -559,7 +605,20 @@ impl EvalRunner {
                 .await
         };
 
-        QuestionResult {
+        // Attribute a non-correct answer to the stage that lost it. Skip
+        // attribution on an infrastructure retrieval failure — that is not a
+        // model/retrieval quality signal.
+        let fail_stage = if retrieval_failed {
+            None
+        } else {
+            FailStage::attribute(
+                matches!(judged.verdict, Verdict::Correct),
+                memories_retrieved,
+                context_supported,
+            )
+        };
+
+        let result = QuestionResult {
             question_id: instance.question_id.clone(),
             question_type: instance.question_type,
             question: instance.question.clone(),
@@ -582,10 +641,77 @@ impl EvalRunner {
             write_attempted,
             write_stored,
             write_deduplicated,
+        };
+        QuestionRun {
+            result,
+            retrieved,
+            fail_stage,
+            plan_trace,
         }
     }
 
-    fn write_reports(&self, report: &BenchmarkReport) -> std::io::Result<()> {
+    /// Capture the server's `QUERY_TRACE` for this question's cue. Best-effort:
+    /// a trace failure warns and yields `None`.
+    async fn capture_plan_trace(
+        &self,
+        harness: &BrainEvalHarness,
+        instance: &EvalInstance,
+    ) -> Option<PlanTrace> {
+        let req = QueryTraceRequest {
+            query: trace_query_request(&instance.question, self.config.max_results),
+        };
+        match harness.client().query_trace(&req).await {
+            Ok(resp) => Some(PlanTrace::from_wire(&resp)),
+            Err(e) => {
+                warn!(
+                    question_id = %instance.question_id,
+                    error = %e,
+                    "query_trace capture failed; plan_trace omitted",
+                );
+                None
+            }
+        }
+    }
+
+    /// Re-recall this question with graph enrichment and attach each returned
+    /// memory's extracted graph to the matching entry in `retrieved` (by id).
+    /// Best-effort: a failure warns and leaves the graphs unset.
+    async fn attach_retrieved_graph(
+        &self,
+        harness: &BrainEvalHarness,
+        instance: &EvalInstance,
+        retrieved: &mut [RetrievedMemory],
+    ) {
+        let req = RecallBuilder::new(instance.question.as_str())
+            .max_results(self.config.max_results)
+            .include_graph(true)
+            .include_text(true)
+            .build();
+        let enriched = match harness.client().recall(&req).await {
+            Ok(a) => a,
+            Err(e) => {
+                warn!(
+                    question_id = %instance.question_id,
+                    error = %e,
+                    "graph-enriched recall failed; retrieved graphs omitted",
+                );
+                return;
+            }
+        };
+        for m in &enriched.memories {
+            let Some(g) = &m.graph else { continue };
+            let id = m.memory_id.to_string();
+            if let Some(rm) = retrieved.iter_mut().find(|r| r.memory_id == id) {
+                rm.graph = Some(MemoryGraph::from_wire(g));
+            }
+        }
+    }
+
+    fn write_reports(
+        &self,
+        report: &BenchmarkReport,
+        run_report: &RunReport,
+    ) -> std::io::Result<()> {
         std::fs::create_dir_all(&self.config.output_dir)?;
         let stem = format!(
             "{}-{}",
@@ -604,8 +730,157 @@ impl EvalRunner {
                 warn!(reporter = ?kind, error = %e, "reporter failed");
             }
         }
+
+        // The exhaustive run report is always written (independent of the
+        // configured summary reporters) — it is the lossless artifact.
+        let run_path = self.config.output_dir.join(format!("{stem}.run.json"));
+        if let Err(ref e) = JsonRunReporter.write(run_report, &run_path) {
+            warn!(error = %e, "run-report write failed");
+        }
         Ok(())
     }
+}
+
+/// The full output of [`EvalRunner::run_question`]: the summary result plus
+/// the run-report extras (full retrieved memories + attributed fail stage).
+struct QuestionRun {
+    result: QuestionResult,
+    retrieved: Vec<RetrievedMemory>,
+    fail_stage: Option<FailStage>,
+    plan_trace: Option<PlanTrace>,
+}
+
+/// Per-conversation write state threaded from ingest through to the
+/// conversation ledger.
+struct ConvWrite {
+    latency_ms: u64,
+    attempted: u64,
+    stored: u64,
+    deduplicated: u64,
+    ingest_failed: bool,
+    stored_ids: Vec<WireMemoryId>,
+    stored_texts: Vec<String>,
+    drain: Option<DrainBarrierStats>,
+}
+
+impl ConvWrite {
+    /// A read-only reconnect performed no write.
+    fn skipped() -> Self {
+        Self {
+            latency_ms: 0,
+            attempted: 0,
+            stored: 0,
+            deduplicated: 0,
+            ingest_failed: false,
+            stored_ids: Vec::new(),
+            stored_texts: Vec::new(),
+            drain: None,
+        }
+    }
+
+    /// Build from an ingest aggregate and the drain plateau (if drained).
+    fn from_ingest(ingest: IngestAggregate, drain: Option<DrainBarrierStats>) -> Self {
+        #[allow(clippy::cast_possible_truncation)]
+        let stored = ingest.stored_ids.len() as u64;
+        Self {
+            latency_ms: ingest.latency_ms,
+            attempted: ingest.attempted,
+            stored,
+            deduplicated: ingest.deduplicated,
+            ingest_failed: ingest.failed,
+            stored_ids: ingest.stored_ids,
+            stored_texts: ingest.stored_texts,
+            drain,
+        }
+    }
+}
+
+/// Record an infrastructure-failed question into all three sinks: the
+/// progress tracker, the summary results, and the run-report records (with
+/// no retrieved memories and no attributable fail stage).
+fn record_failed(
+    tracker: &mut IncrementalTracker,
+    results: &mut Vec<QuestionResult>,
+    records: &mut Vec<QuestionRecord>,
+    r: QuestionResult,
+) {
+    tracker.record(&r);
+    records.push(QuestionRecord {
+        result: r.clone(),
+        retrieved: Vec::new(),
+        fail_stage: None,
+        plan_trace: None,
+    });
+    results.push(r);
+}
+
+/// Whether full-trace stage capture is enabled — default ON. Only an explicit
+/// falsey value (`0`/`false`/`no`/`off`) turns it off, so a fresh run captures
+/// everything unless the operator opts out for a large batch.
+fn full_trace_enabled() -> bool {
+    match std::env::var("BRAIN_EVAL_FULL_TRACE") {
+        Ok(v) => !matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "0" | "false" | "no" | "off"
+        ),
+        Err(_) => true,
+    }
+}
+
+/// Build the `QueryRequest` the `QUERY_TRACE` capture traces: Auto routing,
+/// default fusion, no filters — the same shape a plain RECALL takes.
+fn trace_query_request(text: &str, limit: u32) -> QueryRequest {
+    QueryRequest {
+        text: text.to_string(),
+        entity_anchor: None,
+        kind_filter: Vec::new(),
+        predicate_filter: Vec::new(),
+        time_filter: None,
+        as_of_record_time_unix_nanos: None,
+        confidence_min: None,
+        include_tombstoned: false,
+        include_superseded: false,
+        limit,
+        retrievers: RetrieverSelectionWire::Auto,
+        fusion_config: None,
+        request_id: brain_db_sdk::new_id(),
+    }
+}
+
+/// Capture the extracted typed-graph for each stored memory. For every
+/// `(text, id)` pair, recall by the memory's own turn text with graph
+/// enrichment and pick out the hit whose id matches, recording its graph.
+/// Best-effort per memory: a failed recall or a missing hit is skipped, not
+/// fatal. Only memories whose graph was found are recorded.
+async fn capture_memory_extractions(
+    client: &brain_db_sdk::BrainClient,
+    stored_texts: &[String],
+    stored_ids: &[WireMemoryId],
+    max_results: u32,
+) -> Vec<MemoryExtraction> {
+    let mut out: Vec<MemoryExtraction> = Vec::new();
+    for (text, id) in stored_texts.iter().zip(stored_ids.iter()) {
+        let req = RecallBuilder::new(text.as_str())
+            .max_results(max_results)
+            .include_graph(true)
+            .include_text(true)
+            .build();
+        let ans = match client.recall(&req).await {
+            Ok(a) => a,
+            Err(e) => {
+                warn!(memory_id = %id, error = %e, "write-side graph recall failed; skipping");
+                continue;
+            }
+        };
+        let hit = ans.memories.iter().find(|m| m.memory_id == *id);
+        if let Some(g) = hit.and_then(|m| m.graph.as_ref()) {
+            out.push(MemoryExtraction {
+                memory_id: id.to_string(),
+                graph: MemoryGraph::from_wire(g),
+            });
+        }
+    }
+    out
 }
 
 /// Streams per-question results to a JSONL sidecar as the run progresses
@@ -704,24 +979,35 @@ pub fn datasets_dir() -> Option<PathBuf> {
     std::env::var_os("BRAIN_EVAL_DATASETS_DIR").map(PathBuf::from)
 }
 
-async fn ingest_sessions(
-    harness: &BrainEvalHarness,
-    inst: &EvalInstance,
-) -> (u64, u64, u64, u64, bool) {
+/// The aggregate outcome of ingesting one conversation's sessions.
+struct IngestAggregate {
+    latency_ms: u64,
+    attempted: u64,
+    deduplicated: u64,
+    failed: bool,
+    /// Ids of the fresh memories the substrate accepted — previously
+    /// discarded after counting, now retained for the run report.
+    stored_ids: Vec<WireMemoryId>,
+    /// Source turn text per stored id (same order/length as `stored_ids`),
+    /// used to re-fetch each stored memory's extracted graph.
+    stored_texts: Vec<String>,
+}
+
+async fn ingest_sessions(harness: &BrainEvalHarness, inst: &EvalInstance) -> IngestAggregate {
     let mut total_latency_ms = 0u64;
     let mut attempted = 0u64;
-    let mut stored = 0u64;
     let mut deduplicated = 0u64;
     let mut failed = false;
+    let mut stored_ids: Vec<WireMemoryId> = Vec::new();
+    let mut stored_texts: Vec<String> = Vec::new();
 
     for session in &inst.sessions {
         match harness.ingest(&session.turns).await {
             Ok(out) => {
                 total_latency_ms = total_latency_ms.saturating_add(out.latency_ms);
                 attempted = attempted.saturating_add(out.attempted);
-                #[allow(clippy::cast_possible_truncation)]
-                let s = out.stored_ids.len() as u64;
-                stored = stored.saturating_add(s);
+                stored_ids.extend(out.stored_ids);
+                stored_texts.extend(out.stored_texts);
                 deduplicated = deduplicated.saturating_add(out.deduplicated);
             }
             Err(e) => {
@@ -735,7 +1021,14 @@ async fn ingest_sessions(
         }
     }
 
-    (total_latency_ms, attempted, stored, deduplicated, failed)
+    IngestAggregate {
+        latency_ms: total_latency_ms,
+        attempted,
+        deduplicated,
+        failed,
+        stored_ids,
+        stored_texts,
+    }
 }
 
 fn failed_question_result(
@@ -809,7 +1102,10 @@ fn env_truthy(var: &str) -> bool {
 /// least one write has landed) as flushed. Watching only extraction
 /// would fire reads while statement embeddings are still being computed.
 /// Best-effort: failed polls keep retrying; the cap just proceeds.
-async fn wait_for_write_flush(metrics_addr: SocketAddr, conv: &str) {
+pub(crate) async fn wait_for_write_flush(
+    metrics_addr: SocketAddr,
+    conv: &str,
+) -> DrainBarrierStats {
     use std::time::Duration;
     const INTERVAL: Duration = Duration::from_secs(5);
     const STABLE_NEEDED: u32 = 12; // 60s plateau — tolerates slow LLM batches
@@ -818,6 +1114,8 @@ async fn wait_for_write_flush(metrics_addr: SocketAddr, conv: &str) {
 
     let mut last: i64 = -1;
     let mut stable: u32 = 0;
+    let mut last_ex: u64 = 0;
+    let mut last_em: u64 = 0;
     for i in 0..MAX_POLLS {
         // A scrape failure (endpoint unreachable) is `None` here and skips
         // this poll without resetting the plateau — a transient scrape
@@ -833,6 +1131,8 @@ async fn wait_for_write_flush(metrics_addr: SocketAddr, conv: &str) {
             let em = m
                 .sum("brain_statement_embed_rows_embedded_total")
                 .unwrap_or(0.0) as i64;
+            last_ex = ex.max(0) as u64;
+            last_em = em.max(0) as u64;
             let cur = ex + em;
             if cur == last {
                 stable += 1;
@@ -850,10 +1150,19 @@ async fn wait_for_write_flush(metrics_addr: SocketAddr, conv: &str) {
                     statement_rows_embedded = em,
                     "async write pipeline flushed"
                 );
-                return;
+                return DrainBarrierStats {
+                    extractor_items_written: last_ex,
+                    statement_rows_embedded: last_em,
+                    flushed: true,
+                };
             }
         }
         tokio::time::sleep(INTERVAL).await;
     }
     warn!(conversation = %conv, "write-flush wait hit max; proceeding");
+    DrainBarrierStats {
+        extractor_items_written: last_ex,
+        statement_rows_embedded: last_em,
+        flushed: false,
+    }
 }

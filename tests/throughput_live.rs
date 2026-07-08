@@ -2,7 +2,7 @@
 //!
 //! Boots the production image (E1 `ServerHandle::start_docker` → full
 //! capability stack) and drives each verb (ENCODE / STATEMENT_CREATE /
-//! RELATION_CREATE / QUERY / ENTITY_RESOLVE) from N concurrent connections
+//! RELATION_CREATE / ENTITY_RESOLVE) from N concurrent connections
 //! for a fixed window.
 //!
 //! The assertion is the **correctness** half of the probe — the server
@@ -50,7 +50,6 @@ async fn concurrent_throughput_no_errors() {
     let cfg = ConcurrentConfig {
         clients: 24,
         window: Duration::from_secs(2),
-        query_corpus: 48,
         ..ConcurrentConfig::default()
     };
 

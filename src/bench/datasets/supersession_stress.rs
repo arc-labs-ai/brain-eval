@@ -160,10 +160,12 @@ impl SupersessionStressBenchmark {
             turns.push(TurnRecord {
                 role: "user".to_owned(),
                 content: p.old_turn.clone(),
+                occurred_at_unix_nanos: None,
             });
             turns.push(TurnRecord {
                 role: "user".to_owned(),
                 content: p.new_turn.clone(),
+                occurred_at_unix_nanos: None,
             });
         }
         Session {

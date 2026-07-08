@@ -147,6 +147,7 @@ impl SmokeBenchmark {
                 .map(|line| TurnRecord {
                     role: "user".to_owned(),
                     content: (*line).to_owned(),
+                    occurred_at_unix_nanos: None,
                 })
                 .collect(),
         }

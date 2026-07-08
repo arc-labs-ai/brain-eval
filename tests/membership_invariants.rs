@@ -32,6 +32,7 @@ fn turns(lines: &[&str]) -> Vec<TurnRecord> {
         .map(|l| TurnRecord {
             role: "user".to_owned(),
             content: (*l).to_owned(),
+            occurred_at_unix_nanos: None,
         })
         .collect()
 }

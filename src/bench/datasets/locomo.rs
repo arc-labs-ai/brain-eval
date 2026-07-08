@@ -234,9 +234,15 @@ impl LocomoSample {
                                 Some(date) => format!("[{date}] {}: {}", t.speaker, t.text),
                                 None => format!("{}: {}", t.speaker, t.text),
                             };
+                            // Also pass the date as a structured event time so
+                            // the server anchors relative dates in the utterance
+                            // ("yesterday") to the message date, not ingest time.
+                            let occurred_at_unix_nanos =
+                                when.and_then(parse_locomo_datetime);
                             TurnRecord {
                                 role: "user".to_owned(),
                                 content,
+                                occurred_at_unix_nanos,
                             }
                         })
                         .collect(),
@@ -264,6 +270,93 @@ impl LocomoSample {
             });
         }
     }
+}
+
+/// Parse a LoCoMo timestamp string into unix **nanoseconds** at midnight
+/// UTC of the date it names.
+///
+/// LoCoMo dates look like `"1:56 pm on 8 May, 2023"` — a clock time, the
+/// literal `" on "`, then a `"D Month, YYYY"` (or `"D Month YYYY"`) date.
+/// Some rows drop the clock time and carry only the date. We anchor to the
+/// **date** (midnight UTC); the clock time, when present, is ignored — the
+/// date is what the server's temporal extractor needs to resolve relative
+/// references in the utterance.
+///
+/// Returns `None` for anything that doesn't parse. Never panics.
+///
+/// # Examples
+///
+/// ```
+/// # use brain_eval::bench::datasets::locomo::parse_locomo_datetime;
+/// let nanos = parse_locomo_datetime("1:56 pm on 8 May, 2023").unwrap();
+/// assert_eq!(nanos, 1_683_504_000_000_000_000);
+/// ```
+#[must_use]
+pub fn parse_locomo_datetime(s: &str) -> Option<u64> {
+    // Take the date part: everything after the last " on " if present,
+    // otherwise the whole (trimmed) string.
+    let date_part = match s.rfind(" on ") {
+        Some(idx) => &s[idx + 4..],
+        None => s,
+    }
+    .trim();
+
+    // Expect "<day> <month>[,] <year>": split on whitespace, drop a trailing
+    // comma on the month token.
+    let mut it = date_part.split_whitespace();
+    let day: u32 = it.next()?.parse().ok()?;
+    let month_tok = it.next()?.trim_end_matches(',');
+    let month = month_from_name(month_tok)?;
+    let year: i64 = it.next()?.parse().ok()?;
+    // Reject trailing garbage ("8 May 2023 extra").
+    if it.next().is_some() {
+        return None;
+    }
+
+    if day < 1 || day > 31 || !(1..=12).contains(&month) {
+        return None;
+    }
+
+    let days = days_from_civil(year, month, day);
+    let secs = days.checked_mul(86_400)?;
+    let nanos = secs.checked_mul(1_000_000_000)?;
+    u64::try_from(nanos).ok()
+}
+
+/// Month number (1..=12) from a full or 3-letter English month name,
+/// case-insensitive. `None` for anything else.
+fn month_from_name(name: &str) -> Option<u32> {
+    let n = name.to_ascii_lowercase();
+    let m = match n.as_str() {
+        "january" | "jan" => 1,
+        "february" | "feb" => 2,
+        "march" | "mar" => 3,
+        "april" | "apr" => 4,
+        "may" => 5,
+        "june" | "jun" => 6,
+        "july" | "jul" => 7,
+        "august" | "aug" => 8,
+        "september" | "sep" | "sept" => 9,
+        "october" | "oct" => 10,
+        "november" | "nov" => 11,
+        "december" | "dec" => 12,
+        _ => return None,
+    };
+    Some(m)
+}
+
+/// Days since the unix epoch (1970-01-01) for a proleptic-Gregorian date,
+/// via Howard Hinnant's `days_from_civil` algorithm. Valid for any date;
+/// returns a negative count for dates before the epoch.
+fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = (y - era * 400) as i64; // [0, 399]
+    let m = i64::from(month);
+    let d = i64::from(day);
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1; // [0, 365]
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy; // [0, 146096]
+    era * 146_097 + doe - 719_468
 }
 
 fn map_category(cat: Option<u8>) -> QuestionType {
@@ -366,6 +459,74 @@ mod tests {
             s.expand_into(&mut out);
         }
         assert_eq!(out[0].sessions.len(), 2);
+    }
+
+    #[test]
+    fn parses_datetime_with_clock_time() {
+        // 2023-05-08 00:00:00 UTC = 1_683_504_000 s.
+        let nanos = parse_locomo_datetime("1:56 pm on 8 May, 2023").expect("parse");
+        assert_eq!(nanos, 1_683_504_000_000_000_000);
+    }
+
+    #[test]
+    fn parses_bare_date_without_time() {
+        // No clock time / no " on " prefix — the date alone must parse to the
+        // same midnight-UTC instant as the timestamped form.
+        let nanos = parse_locomo_datetime("8 May, 2023").expect("parse");
+        assert_eq!(nanos, 1_683_504_000_000_000_000);
+    }
+
+    #[test]
+    fn parses_date_without_comma() {
+        let nanos = parse_locomo_datetime("8 May 2023").expect("parse");
+        assert_eq!(nanos, 1_683_504_000_000_000_000);
+    }
+
+    #[test]
+    fn malformed_datetime_returns_none() {
+        assert_eq!(parse_locomo_datetime("not a date"), None);
+        assert_eq!(parse_locomo_datetime(""), None);
+        assert_eq!(parse_locomo_datetime("8 Smarch, 2023"), None);
+        assert_eq!(parse_locomo_datetime("32 May, 2023"), None);
+        assert_eq!(parse_locomo_datetime("8 May, 2023 extra"), None);
+    }
+
+    #[test]
+    fn locomo_turn_carries_structured_event_time() {
+        let samples: Vec<LocomoSample> = serde_json::from_str(sample_text()).expect("parse");
+        let mut out = Vec::new();
+        for s in samples {
+            s.expand_into(&mut out);
+        }
+        // session_1 turn has a per-turn `date_time` of "2024-01-01"; that ISO
+        // form isn't the "D Month, YYYY" LoCoMo shape, so it stays `None` —
+        // the field only populates for parseable LoCoMo dates.
+        let first_turn = &out[0].sessions[0].turns[0];
+        assert_eq!(first_turn.occurred_at_unix_nanos, None);
+    }
+
+    #[test]
+    fn locomo_turn_parses_prose_date() {
+        // A turn whose date is in LoCoMo's prose form populates the field.
+        let text = r#"[
+            {
+                "sample_id": "sample-1",
+                "conversation": {
+                    "session_1_date_time": "1:56 pm on 8 May, 2023",
+                    "session_1": [
+                        {"speaker": "Alice", "text": "Hi."}
+                    ]
+                },
+                "qa": [ {"question": "hi?", "answer": "hi", "category": 1} ]
+            }
+        ]"#;
+        let samples: Vec<LocomoSample> = serde_json::from_str(text).expect("parse");
+        let mut out = Vec::new();
+        for s in samples {
+            s.expand_into(&mut out);
+        }
+        let turn = &out[0].sessions[0].turns[0];
+        assert_eq!(turn.occurred_at_unix_nanos, Some(1_683_504_000_000_000_000));
     }
 
     #[test]

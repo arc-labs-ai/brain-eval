@@ -27,9 +27,9 @@ pub enum EvalError {
         reason: String,
     },
     /// `BRAIN_EVAL_DATASETS_DIR` is not set — the runner can't locate
-    /// dataset files. Run `scripts/download_datasets.sh` (or set the
+    /// dataset files. Run `scripts/fetch-datasets.sh` (or set the
     /// env var manually) before invoking the eval.
-    #[error("BRAIN_EVAL_DATASETS_DIR is not set; run scripts/download_datasets.sh first")]
+    #[error("BRAIN_EVAL_DATASETS_DIR is not set; run scripts/fetch-datasets.sh first")]
     DatasetsDirNotSet,
     /// Something went wrong driving the harness (TCP, handshake, op error).
     #[error("harness error: {0}")]

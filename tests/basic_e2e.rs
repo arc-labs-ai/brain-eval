@@ -47,10 +47,12 @@ fn deterministic_single_hop(n: usize) -> Vec<EvalInstance> {
                         TurnRecord {
                             role: "user".into(),
                             content: statement.to_string(),
+                            occurred_at_unix_nanos: None,
                         },
                         TurnRecord {
                             role: "assistant".into(),
                             content: "Got it.".to_string(),
+                            occurred_at_unix_nanos: None,
                         },
                     ],
                 }],

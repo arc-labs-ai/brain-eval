@@ -119,6 +119,102 @@ fn significant_tokens(s: &str) -> Vec<String> {
         .collect()
 }
 
+/// The answer-grading strategy — the LLM-as-judge when a `live-llm` build
+/// has a provider key, else the always-available [`judge_answer_heuristic`].
+///
+/// A **closed set** of two strategies with an `async` grade step: the
+/// idiomatic Rust shape for that is an enum (static dispatch, native
+/// `async fn`) rather than a `dyn` trait object, which `async fn` can't
+/// back without an extra dependency. The `#[cfg(feature = "live-llm")]`
+/// juggling is confined to the variant and [`Judge::from_env`], so callers
+/// (the dataset [`crate::bench::runner`] and the [`crate::bench::probe`]
+/// staged probe) grade uniformly and never see the feature flag.
+///
+/// Scoped `pub(in crate::bench)` — it is the eval subsystem's shared grader,
+/// not a crate-wide API.
+pub(in crate::bench) enum Judge {
+    /// Deterministic substring + token-overlap grader. Always available.
+    Heuristic,
+    /// LLM-as-judge. Only present in a `live-llm` build with a provider key.
+    #[cfg(feature = "live-llm")]
+    Llm(super::llm_judge::LlmJudge),
+}
+
+impl Judge {
+    /// The LLM judge when configured, else the heuristic.
+    pub(in crate::bench) fn from_env() -> Self {
+        #[cfg(feature = "live-llm")]
+        if let Some(llm) = super::llm_judge::LlmJudge::from_env() {
+            return Self::Llm(llm);
+        }
+        Self::Heuristic
+    }
+
+    /// `llm:<provider>:<model>@<version>` when the LLM judge is active, else
+    /// `"heuristic"` — the judge that actually ran.
+    pub(in crate::bench) fn describe(&self) -> String {
+        match self {
+            Self::Heuristic => "heuristic".to_string(),
+            #[cfg(feature = "live-llm")]
+            Self::Llm(j) => j.describe(),
+        }
+    }
+
+    /// Grade one answer against the gold.
+    pub(in crate::bench) async fn grade(
+        &self,
+        question_id: &str,
+        qtype: QuestionType,
+        question: &str,
+        ground_truth: &str,
+        system_answer: &str,
+    ) -> JudgeResult {
+        match self {
+            Self::Heuristic => {
+                let _ = question; // the heuristic scores against gold alone
+                judge_answer_heuristic(question_id, qtype, ground_truth, system_answer)
+            }
+            #[cfg(feature = "live-llm")]
+            Self::Llm(j) => {
+                j.judge(question_id, qtype, question, ground_truth, system_answer)
+                    .await
+            }
+        }
+    }
+
+    /// Answer-supporting context recall: does the retrieved context fully
+    /// support the gold answer? `None` for the heuristic — that verdict needs
+    /// the LLM, so a heuristic run leaves it unjudged rather than guessing.
+    pub(in crate::bench) async fn grade_support(
+        &self,
+        question: &str,
+        ground_truth: &str,
+        retrieved: &[String],
+    ) -> (Option<bool>, String) {
+        match self {
+            Self::Heuristic => {
+                let _ = (question, ground_truth, retrieved);
+                (None, String::new())
+            }
+            #[cfg(feature = "live-llm")]
+            Self::Llm(j) => match j.judge_support(question, ground_truth, retrieved).await {
+                Some(v) => (Some(v.supported), v.reasoning),
+                None => (None, String::new()),
+            },
+        }
+    }
+
+    /// How many `grade` calls the LLM judge fell back to the heuristic for.
+    /// Always 0 for the heuristic (it is the fallback).
+    pub(in crate::bench) fn heuristic_fallback_count(&self) -> usize {
+        match self {
+            Self::Heuristic => 0,
+            #[cfg(feature = "live-llm")]
+            Self::Llm(j) => j.heuristic_fallback_count(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

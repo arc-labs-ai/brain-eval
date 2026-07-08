@@ -88,13 +88,32 @@ impl LlmClient {
     /// Send `prompt`, returning the model's text reply. Retries transient
     /// failures; fails fast on 4xx. `Err` carries a human-readable reason.
     pub async fn complete(&self, prompt: &str, max_tokens: u32) -> Result<String, String> {
+        self.complete_inner(prompt, max_tokens, false).await
+    }
+
+    /// Like [`Self::complete`], but constrains the reply to a JSON object
+    /// when the provider supports it (OpenAI `response_format: json_object`).
+    /// The prompt must itself mention JSON for OpenAI to honor the mode; ours
+    /// do. Anthropic has no equivalent knob — the prompt's explicit
+    /// "respond with ONLY a JSON object" instruction carries it there — so
+    /// this is a no-op for Anthropic and behaves exactly like `complete`.
+    pub async fn complete_json(&self, prompt: &str, max_tokens: u32) -> Result<String, String> {
+        self.complete_inner(prompt, max_tokens, true).await
+    }
+
+    async fn complete_inner(
+        &self,
+        prompt: &str,
+        max_tokens: u32,
+        json_mode: bool,
+    ) -> Result<String, String> {
         let mut last_err = String::from("no attempt made");
         for attempt in 0..MAX_RETRIES {
             if attempt > 0 {
                 // 0.5s, 1s, 2s backoff.
                 tokio::time::sleep(Duration::from_millis(500u64 << (attempt - 1))).await;
             }
-            match self.call(prompt, max_tokens).await {
+            match self.call(prompt, max_tokens, json_mode).await {
                 Ok(text) => return Ok(text),
                 Err(e) => {
                     let retryable = e.retryable;
@@ -108,10 +127,15 @@ impl LlmClient {
         Err(last_err)
     }
 
-    async fn call(&self, prompt: &str, max_tokens: u32) -> Result<String, CallError> {
+    async fn call(
+        &self,
+        prompt: &str,
+        max_tokens: u32,
+        json_mode: bool,
+    ) -> Result<String, CallError> {
         match self.provider {
             Provider::Anthropic => self.call_anthropic(prompt, max_tokens).await,
-            Provider::OpenAI => self.call_openai(prompt, max_tokens).await,
+            Provider::OpenAI => self.call_openai(prompt, max_tokens, json_mode).await,
         }
     }
 
@@ -150,13 +174,23 @@ impl LlmClient {
         Ok(parsed.content.into_iter().map(|b| b.text).collect())
     }
 
-    async fn call_openai(&self, prompt: &str, max_tokens: u32) -> Result<String, CallError> {
-        let body = serde_json::json!({
+    async fn call_openai(
+        &self,
+        prompt: &str,
+        max_tokens: u32,
+        json_mode: bool,
+    ) -> Result<String, CallError> {
+        let mut body = serde_json::json!({
             "model": self.model,
             "max_tokens": max_tokens,
             "temperature": 0,
             "messages": [{ "role": "user", "content": prompt }],
         });
+        if json_mode {
+            // Constrain the reply to a syntactically valid JSON object so the
+            // grader never has to salvage a verdict from prose.
+            body["response_format"] = serde_json::json!({ "type": "json_object" });
+        }
         let resp = self
             .client
             .post(OPENAI_URL)

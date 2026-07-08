@@ -174,6 +174,7 @@ impl LmeRow {
                         .map(|t| TurnRecord {
                             role: t.role,
                             content: t.content,
+                            occurred_at_unix_nanos: None,
                         })
                         .collect(),
                 })

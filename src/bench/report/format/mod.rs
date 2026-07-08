@@ -6,6 +6,7 @@ use std::path::Path;
 use crate::bench::report::shape::BenchmarkReport;
 
 pub mod json;
+pub mod run_json;
 pub mod text;
 
 /// Trait every reporter implements. Stateless.

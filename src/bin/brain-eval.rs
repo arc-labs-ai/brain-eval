@@ -77,6 +77,17 @@ async fn async_main() -> ExitCode {
 
     // System / offline commands that don't run a dataset eval.
     match benchmark_name {
+        "probe" => {
+            // `probe` alone → single controlled pair; `probe <benchmark>` →
+            // staged per-stage run over that benchmark.
+            let staged = args.get(1).filter(|a| !a.starts_with("--")).cloned();
+            // Self-boot Docker unless an external server was named (via
+            // --endpoint or BRAIN_EVAL_ENDPOINT).
+            let external =
+                endpoint_override.is_some() || std::env::var("BRAIN_EVAL_ENDPOINT").is_ok();
+            let external_endpoint = external.then(|| resolve_endpoint(endpoint_override));
+            return probe_cmd(staged.as_deref(), external_endpoint).await;
+        }
         "acceptance" => return acceptance_cmd(resolve_endpoint(endpoint_override)).await,
         "soak" => return soak_cmd(resolve_endpoint(endpoint_override)).await,
         // Recompute a full report from a streamed partial-results file —
@@ -168,6 +179,149 @@ fn resolve_endpoint(override_: Option<SocketAddr>) -> SocketAddr {
                 .parse()
                 .expect("invariant: default endpoint literal parses")
         })
+}
+
+/// `brain-eval probe` — one controlled write + one controlled read, with
+/// a stage-by-stage "what we wanted vs what we got" table. The system
+/// smoke test before a full eval: confirms the pipeline works end to end
+/// and that the per-stage journal (`brain_debug::stage`) is wired.
+/// `probe` — self-contained. With no external endpoint it boots
+/// `brain:latest` in Docker itself (full pipeline, models from the
+/// `brain-models` volume, LLM key forwarded from `BRAIN__LLM__API_KEY`),
+/// runs, and tears the container down. Pass `--endpoint` /
+/// `BRAIN_EVAL_ENDPOINT` to target an already-running server instead.
+///
+/// `benchmark = None` → single controlled write+read (a correctness gate).
+/// `Some(name)` → staged per-stage run; the report is the deliverable, so
+/// it exits 0 whatever the per-question verdicts. `BRAIN_EVAL_MAX_QUESTIONS`
+/// caps it (the runner ingests a conversation before asking its questions
+/// and stops at the cap). File-backed benchmarks need
+/// `BRAIN_EVAL_DATASETS_DIR`.
+async fn probe_cmd(benchmark: Option<&str>, external_endpoint: Option<SocketAddr>) -> ExitCode {
+    use brain_eval::client::{DockerServerOpts, KeyMinter, ServerHandle};
+
+    // Validate the benchmark name before booting anything.
+    let bench: Option<Box<dyn Benchmark>> = match benchmark {
+        None => None,
+        Some("smoke") => Some(Box::new(SmokeBenchmark)),
+        Some("locomo") => Some(Box::new(LocomoBenchmark)),
+        Some("longmemeval-s" | "longmemeval" | "lme") => Some(Box::new(LongMemEvalS)),
+        Some("dmr") => Some(Box::new(DmrBenchmark)),
+        Some(other) => {
+            eprintln!(
+                "probe: unknown benchmark '{other}' (supported: smoke, locomo, longmemeval-s, dmr)"
+            );
+            return ExitCode::from(2);
+        }
+    };
+
+    // Reads-only reuse: BRAIN_EVAL_REUSE_AGENT=<uuid> targets an
+    // already-ingested agent (skip the write). Pair with --endpoint against
+    // a kept server.
+    let reuse_agent: Option<[u8; 16]> = std::env::var("BRAIN_EVAL_REUSE_AGENT")
+        .ok()
+        .and_then(|s| uuid::Uuid::parse_str(s.trim()).ok())
+        .map(uuid::Uuid::into_bytes);
+    // Keep a self-booted server up afterward (so a later reads-only run can
+    // reuse the ingest) instead of tearing it down.
+    let keep = matches!(
+        std::env::var("BRAIN_EVAL_KEEP_SERVER").ok().as_deref(),
+        Some("1" | "true" | "yes" | "on")
+    );
+
+    // Resolve the server: external (named) or self-boot Docker. Also the
+    // metrics-plane address, used to drain the async write pipeline before
+    // reading.
+    let (endpoint, minter, mut handle, metrics_addr) = match external_endpoint {
+        Some(ep) => {
+            // Metrics plane defaults to 9091 on the same host; override with
+            // BRAIN_EVAL_DRAIN_ADMIN_PORT (mirrors the dataset runner).
+            let port = std::env::var("BRAIN_EVAL_DRAIN_ADMIN_PORT")
+                .ok()
+                .and_then(|p| p.parse::<u16>().ok())
+                .unwrap_or(9091);
+            let metrics = SocketAddr::new(ep.ip(), port);
+            (ep, KeyMinter::from_external_env(ep), None, metrics)
+        }
+        None => {
+            println!("brain-eval :: booting brain:latest in Docker (no --endpoint given)…");
+            // Default arena (256MiB) is ample — even a 400-turn conversation
+            // plus HyPE question vectors uses <10MB of arena. Keeping it small
+            // leaves headroom for the embed + GLiNER models under Docker
+            // Desktop's memory ceiling.
+            let opts = DockerServerOpts::default();
+            // The image publishes its metrics plane (9091) at 19091 on the host.
+            let metrics: SocketAddr = "127.0.0.1:19091"
+                .parse()
+                .expect("invariant: literal metrics addr parses");
+            match ServerHandle::start_docker(opts).await {
+                Ok(h) => (h.endpoint(), h.key_minter(), Some(h), metrics),
+                Err(e) => {
+                    eprintln!("error: could not boot docker server: {e}");
+                    eprintln!(
+                        "  need: BRAIN__LLM__API_KEY set, the `brain:latest` image, and the `brain-models` volume"
+                    );
+                    return ExitCode::from(1);
+                }
+            }
+        }
+    };
+
+    // Keep the self-booted container alive after the run when asked.
+    if keep {
+        if let Some(h) = handle.as_mut() {
+            h.keep_alive();
+        }
+    }
+
+    let is_staged = bench.is_some();
+    let result = match bench {
+        None => brain_eval::bench::probe::run_probe(&minter, endpoint).await,
+        Some(b) => {
+            let max_q = std::env::var("BRAIN_EVAL_MAX_QUESTIONS")
+                .ok()
+                .and_then(|s| s.parse().ok());
+            brain_eval::bench::probe::staged::run_staged(
+                &minter,
+                endpoint,
+                Some(metrics_addr),
+                reuse_agent,
+                b.as_ref(),
+                max_q,
+            )
+            .await
+        }
+    };
+
+    // Tear down a self-booted container — unless keep_alive() was set, in
+    // which case stop() is a no-op and we print how to reuse/clean it up.
+    if let Some(h) = handle {
+        h.stop().await;
+        if keep {
+            println!();
+            println!("server kept for reuse (data lives only while it runs):");
+            println!(
+                "  reads-only re-run: BRAIN_EVAL_REUSE_AGENT=<agent printed above> \\
+    BRAIN_EVAL_ADMIN_SECRET=eval-admin-secret BRAIN_EVAL_ADMIN_PORT=19092 \\
+    BRAIN_EVAL_DRAIN_ADMIN_PORT=19091 … probe <bench> --endpoint 127.0.0.1:18080"
+            );
+            println!("  stop when done:    docker rm -f brain-eval-server");
+        }
+    }
+
+    match result {
+        Ok(true) => ExitCode::SUCCESS,
+        // Staged report is the deliverable — completing is success.
+        Ok(false) if is_staged => ExitCode::SUCCESS,
+        Ok(false) => {
+            eprintln!("probe: FAIL — a stage did not produce the expected result");
+            ExitCode::from(1)
+        }
+        Err(e) => {
+            eprintln!("error: probe failed: {e}");
+            ExitCode::from(1)
+        }
+    }
 }
 
 /// `brain-eval acceptance` — run the v1.0 acceptance suite and gate on it.
@@ -364,6 +518,10 @@ fn print_usage() {
          \x20 locomo          LoCoMo (needs BRAIN_EVAL_DATASETS_DIR)\n\
          \n\
          system commands:\n\
+         \x20 probe [bench]   stage-by-stage want-vs-got; self-boots brain:latest in Docker\n\
+         \x20                 (no bench = one controlled write+read; bench = smoke|locomo|longmemeval-s|dmr)\n\
+         \x20                 needs BRAIN__LLM__API_KEY; file datasets need BRAIN_EVAL_DATASETS_DIR;\n\
+         \x20                 BRAIN_EVAL_MAX_QUESTIONS caps it; --endpoint targets an external server\n\
          \x20 acceptance      v1.0 acceptance suite (latency/throughput/recall/scenarios)\n\
          \x20                 BRAIN_EVAL_RESTART_RECOVERY=1 adds the restart-recovery gate\n\
          \x20 soak            sustained workload + drift sampling (BRAIN_EVAL_SOAK_SECS)\n\

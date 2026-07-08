@@ -130,6 +130,7 @@ impl BrainEvalHarness {
     pub async fn ingest(&self, turns: &[TurnRecord]) -> Result<IngestOutcome, HarnessError> {
         let start = Instant::now();
         let mut stored_ids: Vec<WireMemoryId> = Vec::new();
+        let mut stored_texts: Vec<String> = Vec::new();
         let mut attempted = 0u64;
         let mut deduplicated = 0u64;
 
@@ -141,18 +142,24 @@ impl BrainEvalHarness {
                 continue;
             }
             attempted += 1;
-            let request = EncodeBuilder::new(turn.content.as_str()).build();
+            let mut b = EncodeBuilder::new(turn.content.as_str());
+            if let Some(ts) = turn.occurred_at_unix_nanos {
+                b = b.occurred_at(ts);
+            }
+            let request = b.build();
             let resp = self.client.encode(&request).await?;
             if resp.was_deduplicated {
                 deduplicated += 1;
             } else {
                 stored_ids.push(resp.memory_id);
+                stored_texts.push(turn.content.clone());
             }
         }
 
         let latency_ms = elapsed_ms(start);
         Ok(IngestOutcome {
             stored_ids,
+            stored_texts,
             attempted,
             deduplicated,
             latency_ms,
@@ -194,6 +201,10 @@ impl BrainEvalHarness {
 pub struct IngestOutcome {
     /// Ids of fresh memories the substrate accepted.
     pub stored_ids: Vec<WireMemoryId>,
+    /// Source turn text for each id in `stored_ids`, same order and length —
+    /// lets a caller re-fetch a stored memory's extracted graph by recalling
+    /// its own text and matching the id.
+    pub stored_texts: Vec<String>,
     /// Number of ENCODE attempts (user turns processed).
     pub attempted: u64,
     /// Number of attempts the server merged into a near-duplicate.

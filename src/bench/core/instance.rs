@@ -43,6 +43,14 @@ pub struct TurnRecord {
     pub role: String,
     /// The utterance text.
     pub content: String,
+    /// The real-world event time of this turn, in unix nanoseconds, when
+    /// the dataset carries an absolute timestamp (e.g. LoCoMo's per-session
+    /// / per-turn date). Passed to the server as structured `occurred_at` so
+    /// the temporal extractor anchors relative dates ("yesterday") to the
+    /// message date rather than the ingest time. `None` when the dataset
+    /// provides no absolute date.
+    #[serde(default)]
+    pub occurred_at_unix_nanos: Option<u64>,
 }
 
 /// Evaluation dimension — used to break down accuracy by question

@@ -16,6 +16,9 @@ pub mod agent_manifest;
 pub mod config;
 pub mod core;
 pub mod datasets;
+/// Staged per-stage want-vs-got probe — a benchmark-runner variant that
+/// instruments each write/read stage instead of only aggregating accuracy.
+pub mod probe;
 pub mod report;
 pub mod runner;
 pub mod score;

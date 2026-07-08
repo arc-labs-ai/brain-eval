@@ -137,6 +137,7 @@ impl LexicalStressBenchmark {
                 .map(|(_, memory, _, _, _)| TurnRecord {
                     role: "user".to_owned(),
                     content: (*memory).to_owned(),
+                    occurred_at_unix_nanos: None,
                 })
                 .collect(),
         }

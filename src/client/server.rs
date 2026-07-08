@@ -54,6 +54,9 @@ pub struct ServerHandle {
     admin_secret: Secret,
     /// Tenant namespace minted keys bind to.
     namespace: String,
+    /// When `true`, the container is left running on stop/drop (for
+    /// read-only reuse across runs). The caller then removes it manually.
+    keep: bool,
 }
 
 /// Knobs for [`ServerHandle::start_docker`]. `Default` mirrors
@@ -206,7 +209,15 @@ impl ServerHandle {
                 std::env::var(crate::client::auth::ENV_ADMIN_SECRET).unwrap_or_default(),
             ),
             namespace: minter.namespace().to_string(),
+            keep: false,
         }
+    }
+
+    /// Leave the container running when this handle stops or drops, so a
+    /// later read-only run can reuse the already-ingested data. The caller
+    /// owns cleanup (`docker rm -f <container>`) afterward.
+    pub fn keep_alive(&mut self) {
+        self.keep = true;
     }
 
     /// Boot `brain:<tag>` in a container, wait for `healthy`, and return a
@@ -248,6 +259,19 @@ impl ServerHandle {
         // admin listener is fail-closed: it refuses to start without a token.
         let admin_addr_env = "BRAIN__SERVER__ADMIN_ADDR=0.0.0.0:9092".to_string();
         let admin_token_env = format!("BRAIN__ADMIN__TOKEN={EVAL_ADMIN_SECRET}");
+
+        // Pass through non-secret config the caller set in its own env: the
+        // LLM model (provider is derived from it) and the log filter (so a
+        // staged/probe run can turn on the server's `brain_debug::stage`
+        // journal). The API key is NOT here — it rides the 0600 env-file.
+        let mut extra_env: Vec<String> = Vec::new();
+        for key in ["BRAIN__LLM__MODEL", "BRAIN_LOG"] {
+            if let Ok(v) = std::env::var(key) {
+                if !v.is_empty() {
+                    extra_env.push(format!("{key}={v}"));
+                }
+            }
+        }
 
         let mut args: Vec<&str> = vec![
             "run",
@@ -296,6 +320,10 @@ impl ServerHandle {
             "-e",
             &admin_token_env,
         ]);
+        for e in &extra_env {
+            args.push("-e");
+            args.push(e);
+        }
         if let Some(f) = llm_key_file.as_ref() {
             args.push("--env-file");
             args.push(f.path_str());
@@ -318,6 +346,7 @@ impl ServerHandle {
             admin_base: format!("http://127.0.0.1:{}", opts.admin_port),
             admin_secret: Secret::new(EVAL_ADMIN_SECRET),
             namespace: DEFAULT_NAMESPACE.to_string(),
+            keep: false,
         };
 
         handle
@@ -346,6 +375,9 @@ impl ServerHandle {
     /// Stop and remove the container (no-op for an external server).
     /// Idempotent; also runs on drop.
     pub async fn stop(self) {
+        if self.keep {
+            return;
+        }
         if let Backing::Container { name } = &self.backing {
             let _ = run_docker(&["rm", "-f", name]).await;
         }
@@ -373,6 +405,9 @@ impl ServerHandle {
 
 impl Drop for ServerHandle {
     fn drop(&mut self) {
+        if self.keep {
+            return;
+        }
         if let Backing::Container { name } = &self.backing {
             // Best-effort synchronous cleanup — Drop can't await.
             let _ = std::process::Command::new("docker")

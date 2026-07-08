@@ -74,7 +74,7 @@ impl LlmJudge {
         system_answer: &str,
     ) -> JudgeResult {
         let prompt = render_verdict_prompt(qtype, question, ground_truth, system_answer);
-        match self.client.complete(&prompt, MAX_TOKENS).await {
+        match self.client.complete_json(&prompt, MAX_TOKENS).await {
             Ok(reply) => parse_verdict(question_id, &reply).unwrap_or_else(|| {
                 self.heuristic_fallbacks.fetch_add(1, Ordering::Relaxed);
                 self.warn_once(&format!("unparseable reply: {}", truncate(&reply, 120)));
@@ -160,6 +160,7 @@ fn render_verdict_prompt(
 ) -> String {
     VERDICT_PROMPT_TEMPLATE
         .replace("{type_guidance}", verdict_type_guidance(qtype))
+        .replace("{category}", qtype.tag())
         .replace("{question}", question)
         .replace("{ground_truth}", ground_truth)
         .replace("{system_answer}", system_answer)
@@ -198,7 +199,8 @@ pub struct SupportVerdict {
 
 #[derive(serde::Deserialize)]
 struct VerdictReply {
-    verdict: String,
+    /// Binary verdict from the category-aware judge.
+    correct: bool,
     #[serde(default)]
     reasoning: String,
 }
@@ -226,8 +228,11 @@ fn parse_support(reply: &str) -> Option<SupportVerdict> {
     })
 }
 
-/// Parse a verdict out of the model's reply. Tolerates surrounding prose by
-/// extracting the first `{ .. }` span. `None` if no usable verdict is found.
+/// Parse a binary `{reasoning, correct}` verdict out of the model's reply.
+/// Tolerates surrounding prose by extracting the outermost `{ .. }` span.
+/// `None` if no usable verdict is found. This judge is binary, so it only
+/// ever yields `Correct` / `Incorrect` — `Partial` is reachable only by
+/// other grading paths.
 fn parse_verdict(question_id: &str, reply: &str) -> Option<JudgeResult> {
     let start = reply.find('{')?;
     let end = reply.rfind('}')?;
@@ -236,11 +241,10 @@ fn parse_verdict(question_id: &str, reply: &str) -> Option<JudgeResult> {
     }
     let json = &reply[start..=end];
     let parsed: VerdictReply = serde_json::from_str(json).ok()?;
-    let verdict = match parsed.verdict.trim().to_ascii_lowercase().as_str() {
-        "correct" => Verdict::Correct,
-        "partial" => Verdict::Partial,
-        "incorrect" => Verdict::Incorrect,
-        _ => return None,
+    let verdict = if parsed.correct {
+        Verdict::Correct
+    } else {
+        Verdict::Incorrect
     };
     Some(JudgeResult {
         question_id: question_id.to_owned(),
@@ -256,7 +260,7 @@ mod tests {
 
     #[test]
     fn parses_clean_json() {
-        let r = parse_verdict("q1", r#"{"verdict":"correct","reasoning":"matches"}"#).unwrap();
+        let r = parse_verdict("q1", r#"{"reasoning":"matches","correct":true}"#).unwrap();
         assert_eq!(r.verdict, Verdict::Correct);
         assert_eq!(r.reasoning, "matches");
         assert_eq!(r.question_id, "q1");
@@ -264,15 +268,16 @@ mod tests {
 
     #[test]
     fn parses_json_wrapped_in_prose() {
-        let reply = "Here is my grade:\n{\"verdict\": \"PARTIAL\", \"reasoning\": \"missing date\"}\nThanks.";
+        let reply =
+            "Here is my grade:\n{\"reasoning\": \"missing date\", \"correct\": false}\nThanks.";
         let r = parse_verdict("q2", reply).unwrap();
-        assert_eq!(r.verdict, Verdict::Partial);
-        assert!((r.score - 0.5).abs() < f64::EPSILON);
+        assert_eq!(r.verdict, Verdict::Incorrect);
+        assert!(r.score.abs() < f64::EPSILON);
     }
 
     #[test]
     fn incorrect_maps_to_zero() {
-        let r = parse_verdict("q3", r#"{"verdict":"incorrect","reasoning":"wrong"}"#).unwrap();
+        let r = parse_verdict("q3", r#"{"reasoning":"wrong","correct":false}"#).unwrap();
         assert_eq!(r.verdict, Verdict::Incorrect);
         assert!(r.score.abs() < f64::EPSILON);
     }
@@ -280,12 +285,15 @@ mod tests {
     #[test]
     fn unknown_or_garbage_is_none() {
         assert!(parse_verdict("q", "no json here").is_none());
-        assert!(parse_verdict("q", r#"{"verdict":"maybe"}"#).is_none());
+        // Missing the required `correct` boolean.
+        assert!(parse_verdict("q", r#"{"reasoning":"maybe"}"#).is_none());
+        // Wrong type for `correct`.
+        assert!(parse_verdict("q", r#"{"correct":"maybe"}"#).is_none());
     }
 
     #[test]
     fn missing_reasoning_defaults_empty() {
-        let r = parse_verdict("q", r#"{"verdict":"correct"}"#).unwrap();
+        let r = parse_verdict("q", r#"{"correct":true}"#).unwrap();
         assert_eq!(r.verdict, Verdict::Correct);
         assert_eq!(r.reasoning, "");
     }

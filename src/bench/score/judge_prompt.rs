@@ -18,11 +18,13 @@ use sha2::{Digest, Sha256};
 use crate::bench::core::instance::QuestionType;
 
 /// Bumped whenever a judge prompt's wording changes. Reports carry it so
-/// a methodology change is never silent. v2 adds per-question-type grading
-/// guidance (temporal off-by-one, knowledge-update latest-value,
-/// preference, multi-hop, unanswerable) — matching LongMemEval's official
-/// per-type judging instead of one generic rubric.
-pub const JUDGE_PROMPT_VERSION: &str = "v2";
+/// a methodology change is never silent. v3 switches the verdict to a
+/// binary, category-aware, structured-JSON grader modeled on LongMemEval's
+/// per-category rubric: the model reasons first (reasoning before verdict),
+/// emits `{"reasoning", "correct": bool}`, and the per-category rules
+/// (temporal off-by-one, knowledge-update latest-value, strict all-present
+/// lists, gold-routed abstention) are spliced in by question category.
+pub const JUDGE_PROMPT_VERSION: &str = "v3";
 
 /// Grading temperature recorded in the report for transparency. This value
 /// is advisory: the judge does not thread it through to the API — the
@@ -31,59 +33,73 @@ pub const JUDGE_PROMPT_VERSION: &str = "v2";
 /// the recorded value matches the client's pinned behavior.
 pub const JUDGE_TEMPERATURE: f64 = 0.0;
 
-/// Verdict prompt: grade a system answer against the reference.
-/// `{question}`, `{ground_truth}`, `{system_answer}` are filled per call.
-pub const VERDICT_PROMPT_TEMPLATE: &str = "You are a strict grader for a memory question-answering benchmark. \
-Decide whether the system's answer is correct given the reference answer.\n\n\
+/// Verdict prompt: grade a system answer against the reference. Binary,
+/// category-aware, structured-JSON. The model reasons BEFORE it decides so
+/// the verdict follows the reasoning rather than being rationalized after
+/// the fact. `{question}`, `{ground_truth}`, `{system_answer}`,
+/// `{category}`, and `{type_guidance}` are filled per call.
+pub const VERDICT_PROMPT_TEMPLATE: &str = "You are a strict grader for a long-term-memory \
+question-answering benchmark. Decide whether the SYSTEM ANSWER is correct given the \
+REFERENCE ANSWER, judging meaning rather than surface wording.\n\n\
 Question: {question}\n\
 Reference answer: {ground_truth}\n\
-System answer: {system_answer}\n\n\
-Grade \"correct\" if the system answer conveys the reference answer's key \
-facts (a paraphrase or extra detail is fine). Grade \"partial\" if it is \
-only partially right or omits a key detail. Grade \"incorrect\" if it is \
-wrong, irrelevant, or empty. If the reference answer indicates the question \
-is unanswerable, grade \"correct\" only when the system declined to answer.\n\n\
+System answer: {system_answer}\n\
+Question category: {category}\n\n\
 {type_guidance}\
-Respond with ONLY a JSON object, no prose:\n\
-{{\"verdict\": \"correct\" | \"partial\" | \"incorrect\", \"reasoning\": \"<one short sentence>\"}}";
+General rules:\n\
+- Judge meaning, not form: ignore paraphrase, formatting, and equivalent date-number \
+expressions (e.g. \"two weeks\" vs \"14 days\").\n\
+- Do not reward verbosity: extra correct context is fine, but any claim that CONTRADICTS \
+the reference makes the answer incorrect.\n\
+- When the reference enumerates several items, the answer is correct only if EVERY item is \
+present (order-independent); extra non-contradicting items are tolerated.\n\
+- An empty, evasive, or \"I don't know\" answer is incorrect UNLESS the category rule says \
+otherwise.\n\n\
+Reason first, then decide. Respond with ONLY a JSON object — no prose, no code fence — \
+with \"reasoning\" BEFORE \"correct\":\n\
+{{\"reasoning\": \"<1-2 sentences>\", \"correct\": true}}";
 
-/// Per-question-type grading guidance spliced into the verdict prompt at
-/// `{type_guidance}`. A generic rubric under-credits answers that are
-/// correct under the type's own rules — a temporal answer off by a day, a
-/// knowledge-update answer that gives the latest value, a preference
-/// paraphrase. Returns `""` for types that need no special handling
-/// (single-hop / other) so the prompt is unchanged there. Mirrors
-/// LongMemEval's per-type judge instructions.
+/// Per-category grading rule spliced into the verdict prompt at
+/// `{type_guidance}`. A category-blind rubric systematically mis-grades the
+/// hard categories — an abstention question wants a decline, a
+/// knowledge-update question wants the newest value, a temporal count may be
+/// off by one and still correct. Each arm ends in a blank line so it drops
+/// cleanly ahead of the general rules. Unknown / catch-all categories reuse
+/// the single-hop rule. Mirrors the LongMemEval per-category judge.
 #[must_use]
 pub fn verdict_type_guidance(qtype: QuestionType) -> &'static str {
     match qtype {
-        QuestionType::Temporal => {
-            "Type-specific guidance (temporal): do not penalize an off-by-one day; accept an answer \
-             that names the correct date, month, or period even if phrased differently (e.g. a \
-             relative expression resolved to the right month). A date within a day of the reference \
-             is correct.\n\n"
-        }
-        QuestionType::KnowledgeUpdate => {
-            "Type-specific guidance (knowledge update): the reference is the LATEST value after an \
-             update. Grade correct only if the system gives the updated value; repeating an \
-             outdated earlier value is incorrect.\n\n"
-        }
-        QuestionType::Preference => {
-            "Type-specific guidance (preference): grade correct if the system captures the user's \
-             stated preference (the liked / disliked / favorite thing); reasonable phrasing \
-             variants are fine.\n\n"
+        QuestionType::SingleHop | QuestionType::Other => {
+            "Category rule (single-hop): mark correct when the system answer states the gold \
+             fact; a paraphrase or additional correct context is fine. Missing or contradicting \
+             the gold fact is incorrect.\n\n"
         }
         QuestionType::MultiHop => {
-            "Type-specific guidance (multi-hop): the answer must combine facts across memories; an \
-             answer that states the final synthesized fact is correct even if it omits the \
-             intermediate steps.\n\n"
+            "Category rule (multi-hop): the answer must combine facts across memories. Mark \
+             correct when it states the final synthesized fact, or all the intermediate facts \
+             that entail it. If the reference lists several items, EVERY gold item must be \
+             present (order-independent); missing any one is incorrect.\n\n"
+        }
+        QuestionType::Temporal => {
+            "Category rule (temporal): apply the general rules, but do NOT penalize an off-by-one \
+             on a day / week / month COUNT (e.g. 19 vs 18 days is correct). The referenced date or \
+             event itself must still match — a wrong date or wrong event is incorrect.\n\n"
+        }
+        QuestionType::KnowledgeUpdate => {
+            "Category rule (knowledge-update): the reference is the MOST RECENT value after an \
+             update. Mark correct only if the system states the current value (it may also mention \
+             older superseded values); stating only an outdated value is incorrect.\n\n"
+        }
+        QuestionType::Preference => {
+            "Category rule (preference): mark correct when the system captures the user's stated \
+             preference (the liked / disliked / favorite thing); reasonable phrasing variants are \
+             fine.\n\n"
         }
         QuestionType::Abstention | QuestionType::Adversarial => {
-            "Type-specific guidance (unanswerable): this question cannot be answered from the \
-             stored memories. Grade correct ONLY if the system declined or said it does not know; \
-             any substantive answer is incorrect.\n\n"
+            "Category rule (unanswerable): the reference indicates the information is unavailable. \
+             Mark correct ONLY if the system declined or said it does not know; a confident, \
+             concrete answer is incorrect.\n\n"
         }
-        QuestionType::SingleHop | QuestionType::Other => "",
     }
 }
 
@@ -142,22 +158,38 @@ mod tests {
     fn templates_keep_their_placeholders() {
         assert!(VERDICT_PROMPT_TEMPLATE.contains("{question}"));
         assert!(VERDICT_PROMPT_TEMPLATE.contains("{system_answer}"));
+        assert!(VERDICT_PROMPT_TEMPLATE.contains("{category}"));
         assert!(VERDICT_PROMPT_TEMPLATE.contains("{type_guidance}"));
         assert!(SUPPORT_PROMPT_TEMPLATE.contains("{retrieved}"));
         assert!(SUPPORT_PROMPT_TEMPLATE.contains("{ground_truth}"));
     }
 
     #[test]
-    fn type_guidance_is_specific_or_empty() {
-        // Types with their own grading rules get guidance...
-        assert!(verdict_type_guidance(QuestionType::Temporal).contains("off-by-one"));
-        assert!(verdict_type_guidance(QuestionType::KnowledgeUpdate).contains("LATEST"));
-        assert!(verdict_type_guidance(QuestionType::Preference).contains("preference"));
+    fn verdict_prompt_reasons_before_deciding() {
+        // The JSON example must place the quoted "reasoning" key ahead of the
+        // quoted "correct" key so the model commits to a rationale first.
+        let ri = VERDICT_PROMPT_TEMPLATE
+            .find("\"reasoning\"")
+            .expect("reasoning key present");
+        let ci = VERDICT_PROMPT_TEMPLATE
+            .find("\"correct\"")
+            .expect("correct key present");
+        assert!(
+            ri < ci,
+            "reasoning must precede correct in the JSON example"
+        );
+    }
+
+    #[test]
+    fn type_guidance_is_category_specific() {
+        // Every category yields a non-empty rule (unknown reuses single-hop).
+        assert!(verdict_type_guidance(QuestionType::SingleHop).contains("single-hop"));
+        assert!(verdict_type_guidance(QuestionType::Other).contains("single-hop"));
         assert!(verdict_type_guidance(QuestionType::MultiHop).contains("multi-hop"));
+        assert!(verdict_type_guidance(QuestionType::Temporal).contains("off-by-one"));
+        assert!(verdict_type_guidance(QuestionType::KnowledgeUpdate).contains("MOST RECENT"));
+        assert!(verdict_type_guidance(QuestionType::Preference).contains("preference"));
         assert!(verdict_type_guidance(QuestionType::Abstention).contains("unanswerable"));
         assert!(verdict_type_guidance(QuestionType::Adversarial).contains("unanswerable"));
-        // ...the default types leave the prompt untouched.
-        assert_eq!(verdict_type_guidance(QuestionType::SingleHop), "");
-        assert_eq!(verdict_type_guidance(QuestionType::Other), "");
     }
 }

@@ -280,11 +280,13 @@ impl ParaphraseStressBenchmark {
             .map(|t| TurnRecord {
                 role: "user".to_owned(),
                 content: t.memory.clone(),
+                occurred_at_unix_nanos: None,
             })
             .collect();
         turns.extend(distractors.iter().map(|d| TurnRecord {
             role: "user".to_owned(),
             content: d.clone(),
+            occurred_at_unix_nanos: None,
         }));
         Session {
             session_id: "paraphrase-stress-session-0".to_owned(),

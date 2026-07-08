@@ -20,6 +20,9 @@
 *.swo
 *~
 
+# reports
+reports/
+
 # OS noise
 .DS_Store
 Thumbs.db

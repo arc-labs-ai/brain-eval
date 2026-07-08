@@ -6,6 +6,7 @@
 
 pub mod baselines;
 pub mod format;
+pub mod run_report;
 pub mod shape;
 
 pub use baselines::{

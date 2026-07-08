@@ -401,6 +401,7 @@ brain-eval/
 | `BRAIN_EVAL_NAMESPACE` | `eval` | Tenant namespace minted keys bind to. |
 | `BRAIN_EVAL_NO_DRAIN` | _(unset = drain)_ | Truthy (`1`/`true`/`yes`/`on`) skips waiting for the async write-time extraction pipeline (entity/statement/relation + statement embedding) to plateau before reading — reads against the live, still-settling graph instead. |
 | `BRAIN_EVAL_DRAIN_ADMIN_PORT` | `9091` | Metrics port polled for the extraction-drain plateau check above (the server's public `/metrics`, not the admin plane). |
+| `BRAIN_EVAL_FULL_TRACE` | _(unset = on)_ | Default ON. Captures per-read stage detail into `*.run.json` (each question's `QUERY_TRACE` plan trace + the extracted graph per retrieved memory) and per-write detail (the extracted graph per stored memory). Adds a few server round-trips per question and per stored memory. Set falsey (`0`/`false`/`no`/`off`) to skip the heavy captures on a large run. |
 | `BRAIN_EVAL_RESTART_RECOVERY` | _(unset)_ | `1` adds the (slower, docker-booting) restart-recovery gate to `brain-eval acceptance`. |
 | `BRAIN_EVAL_SOAK_SECS` | `5` | Soak run duration for `brain-eval soak`. |
 | `BRAIN_EVAL_JUDGE_MODEL` | _(unset)_ | `live-llm` only: override the judge's model (else `BRAIN__LLM__MODEL`, else `gpt-4o-mini`). See [Judges](#judges). |
