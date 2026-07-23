@@ -81,11 +81,22 @@ async fn async_main() -> ExitCode {
             // `probe` alone → single controlled pair; `probe <benchmark>` →
             // staged per-stage run over that benchmark.
             let staged = args.get(1).filter(|a| !a.starts_with("--")).cloned();
-            // Self-boot Docker unless an external server was named (via
-            // --endpoint or BRAIN_EVAL_ENDPOINT).
-            let external =
-                endpoint_override.is_some() || std::env::var("BRAIN_EVAL_ENDPOINT").is_ok();
-            let external_endpoint = external.then(|| resolve_endpoint(endpoint_override));
+            // Connect to a running server by default (the `just docker-serve`
+            // Brain on the persistent `brain-data` volume, at DEFAULT_ENDPOINT
+            // 127.0.0.1:9090, or `--endpoint` / BRAIN_EVAL_ENDPOINT). Spinning
+            // up a throwaway `brain:latest` container writes to an anonymous
+            // volume that vanishes on teardown, so it is now opt-in only —
+            // `--self-boot` or BRAIN_EVAL_SELF_BOOT=1 — never the default.
+            let self_boot = parse_bool_flag(&args[1..], "--self-boot")
+                || matches!(
+                    std::env::var("BRAIN_EVAL_SELF_BOOT").ok().as_deref(),
+                    Some("1" | "true" | "yes" | "on")
+                );
+            let external_endpoint = if self_boot {
+                None
+            } else {
+                Some(resolve_endpoint(endpoint_override))
+            };
             return probe_cmd(staged.as_deref(), external_endpoint).await;
         }
         "acceptance" => return acceptance_cmd(resolve_endpoint(endpoint_override)).await,
@@ -141,6 +152,14 @@ async fn async_main() -> ExitCode {
     if let Some(ep) = endpoint_override {
         config.endpoint = ep;
     }
+    // `--only-conversation <id>` / `--verify-memory-list` override the
+    // env-derived config, so the flag wins over BRAIN_EVAL_*.
+    if let Some(id) = parse_only_conversation_flag(&args[1..]) {
+        config.only_conversation = Some(id);
+    }
+    if parse_bool_flag(&args[1..], "--verify-memory-list") {
+        config.verify_memory_list = true;
+    }
 
     println!(
         "brain-eval :: {} ({})",
@@ -185,11 +204,13 @@ fn resolve_endpoint(override_: Option<SocketAddr>) -> SocketAddr {
 /// a stage-by-stage "what we wanted vs what we got" table. The system
 /// smoke test before a full eval: confirms the pipeline works end to end
 /// and that the per-stage journal (`brain_debug::stage`) is wired.
-/// `probe` — self-contained. With no external endpoint it boots
-/// `brain:latest` in Docker itself (full pipeline, models from the
-/// `brain-models` volume, LLM key forwarded from `BRAIN__LLM__API_KEY`),
-/// runs, and tears the container down. Pass `--endpoint` /
-/// `BRAIN_EVAL_ENDPOINT` to target an already-running server instead.
+/// `probe` — targets an already-running server by default (DEFAULT_ENDPOINT
+/// `127.0.0.1:9090`, i.e. the `just docker-serve` Brain on the persistent
+/// `brain-data` volume; override with `--endpoint` / `BRAIN_EVAL_ENDPOINT`).
+/// Self-booting a throwaway `brain:latest` container (full pipeline, models
+/// from the `brain-models` volume, LLM key from `BRAIN__LLM__API_KEY`, torn
+/// down after) is opt-in only — `--self-boot` / `BRAIN_EVAL_SELF_BOOT=1` —
+/// so a run never silently writes to an anonymous volume.
 ///
 /// `benchmark = None` → single controlled write+read (a correctness gate).
 /// `Some(name)` → staged per-stage run; the report is the deliverable, so
@@ -410,6 +431,26 @@ fn parse_endpoint_flag(rest: &[String]) -> Option<SocketAddr> {
         }
     }
     None
+}
+
+/// Pull `--only-conversation ID` (or `--only-conversation=ID`) out of the
+/// trailing args. Returns `None` when absent.
+fn parse_only_conversation_flag(rest: &[String]) -> Option<String> {
+    let mut it = rest.iter();
+    while let Some(arg) = it.next() {
+        if let Some(v) = arg.strip_prefix("--only-conversation=") {
+            return Some(v.to_owned());
+        } else if arg == "--only-conversation" {
+            return it.next().cloned();
+        }
+    }
+    None
+}
+
+/// True when a bare boolean flag (e.g. `--verify-memory-list`) is present in
+/// the trailing args.
+fn parse_bool_flag(rest: &[String], flag: &str) -> bool {
+    rest.iter().any(|a| a == flag)
 }
 
 /// `brain-eval summary <partial.jsonl>` — recompute the full metrics

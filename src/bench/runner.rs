@@ -41,7 +41,8 @@ use crate::client::auth::KeyMinter;
 use crate::client::harness::{BrainEvalHarness, HarnessError, RecallOutcome};
 use crate::client::metrics::PrometheusMetrics;
 use brain_db_sdk::wire::types::{
-    AnswerKindWire, QueryRequest, QueryTraceRequest, RetrieverSelectionWire, WireMemoryId,
+    AnswerKindWire, MemoryListDirWire, MemoryListRequest, MemoryListSortWire,
+    MemoryListTimeAxisWire, QueryRequest, QueryTraceRequest, RetrieverSelectionWire, WireMemoryId,
 };
 use brain_db_sdk::RecallBuilder;
 
@@ -162,6 +163,24 @@ impl EvalRunner {
                 .into_iter()
                 .filter(|i| types.iter().any(|t| t == i.question_type.tag()))
                 .collect::<Vec<_>>(),
+            None => instances,
+        };
+        // Conversation selector: keep only instances whose conversation_id
+        // matches, so a single conversation's haystack is the only thing
+        // ingested. Applied before the count cap so `max_questions` bounds
+        // the selected conversation, not the raw load.
+        let instances = match &self.config.only_conversation {
+            Some(target) => {
+                let kept = instances
+                    .into_iter()
+                    .filter(|i| i.conversation_id.as_deref() == Some(target.as_str()))
+                    .collect::<Vec<_>>();
+                println!(
+                    "eval: --only-conversation {target} — {} question(s) selected",
+                    kept.len()
+                );
+                kept
+            }
             None => instances,
         };
         let instances = match self.config.max_questions {
@@ -431,29 +450,45 @@ impl EvalRunner {
                 });
             }
 
+            // ---- MEMORY_LIST verification (opt-in) ----
+            // Enumerate the tenant timeline on the SAME authenticated agent.
+            // After an ingesting run the drain barrier has settled, so this
+            // cross-checks against what ingest reported storing (`cw.stored`).
+            // In a read-only run there is no ingest count (`cw.stored == 0`),
+            // so it just reports the listed total — the proof that a
+            // persisted, migrated corpus is still fully enumerable.
+            if self.config.verify_memory_list {
+                verify_memory_list(harness.client(), conv_key, cw.stored).await;
+            }
+
             // ---- per-question retrieval + judging ----
-            for &idx in idxs {
-                let inst = &instances[idx];
-                let run = self
-                    .run_question(
-                        &harness,
-                        inst,
-                        cw.latency_ms,
-                        cw.attempted,
-                        cw.stored,
-                        cw.deduplicated,
-                        cw.ingest_failed,
-                        full_trace,
-                    )
-                    .await;
-                tracker.record(&run.result);
-                question_records.push(QuestionRecord {
-                    result: run.result.clone(),
-                    retrieved: run.retrieved,
-                    fail_stage: run.fail_stage,
-                    plan_trace: run.plan_trace,
-                });
-                question_results.push(run.result);
+            // `--verify-memory-list` is a list-only diagnostic: it proves the
+            // tenant timeline is enumerable and skips the (LLM-judged, paid)
+            // per-question pass entirely.
+            if !self.config.verify_memory_list {
+                for &idx in idxs {
+                    let inst = &instances[idx];
+                    let run = self
+                        .run_question(
+                            &harness,
+                            inst,
+                            cw.latency_ms,
+                            cw.attempted,
+                            cw.stored,
+                            cw.deduplicated,
+                            cw.ingest_failed,
+                            full_trace,
+                        )
+                        .await;
+                    tracker.record(&run.result);
+                    question_records.push(QuestionRecord {
+                        result: run.result.clone(),
+                        retrieved: run.retrieved,
+                        fail_stage: run.fail_stage,
+                        plan_trace: run.plan_trace,
+                    });
+                    question_results.push(run.result);
+                }
             }
 
             // ---- close harness (best-effort) ----
@@ -845,6 +880,84 @@ fn trace_query_request(text: &str, limit: u32) -> QueryRequest {
         fusion_config: None,
         request_id: brain_db_sdk::new_id(),
     }
+}
+
+/// Enumerate the calling agent's memories via MEMORY_LIST, paginating with
+/// the opaque keyset cursor until exhausted, and print a verification
+/// summary. Best-effort: a failed page is logged and stops the walk, never
+/// aborts the run. `stored` is what ingest reported writing for this
+/// conversation, used for a MATCH/MISMATCH cross-check.
+async fn verify_memory_list(client: &brain_db_sdk::BrainClient, conv_key: &str, stored: u64) {
+    const PAGE: u32 = 100;
+    let mut cursor: Vec<u8> = Vec::new();
+    let mut texts: Vec<String> = Vec::new();
+    let mut listed: u64 = 0;
+    loop {
+        let request = MemoryListRequest {
+            sort: MemoryListSortWire::Created,
+            dir: MemoryListDirWire::Asc,
+            limit: PAGE,
+            cursor: cursor.clone(),
+            kinds: Vec::new(),
+            include_tombstoned: false,
+            time_axis: MemoryListTimeAxisWire::Created,
+            from_unix_nanos: 0,
+            to_unix_nanos: 0,
+            salience_min: 0.0,
+            salience_max: 1.0,
+            text_contains: String::new(),
+            act_as: None,
+        };
+        let frames = match client.memory_list_frames(&request).await {
+            Ok(f) => f,
+            Err(e) => {
+                warn!(
+                    conversation = %conv_key,
+                    error = %e,
+                    "MEMORY_LIST verify :: page request failed; stopping walk",
+                );
+                break;
+            }
+        };
+        let mut next_cursor: Vec<u8> = Vec::new();
+        for frame in frames {
+            #[allow(clippy::cast_possible_truncation)]
+            {
+                listed = listed.saturating_add(frame.items.len() as u64);
+            }
+            for item in frame.items {
+                if texts.len() < 5 {
+                    texts.push(item.text);
+                }
+            }
+            if !frame.next_cursor.is_empty() {
+                next_cursor = frame.next_cursor;
+            }
+        }
+        if next_cursor.is_empty() {
+            break;
+        }
+        cursor = next_cursor;
+    }
+
+    println!("MEMORY_LIST verify :: conversation {conv_key}: {listed} memories listed");
+    for (i, t) in texts.iter().enumerate() {
+        let trimmed: String = t.chars().take(80).collect();
+        let ellipsis = if t.chars().count() > 80 { "…" } else { "" };
+        println!("MEMORY_LIST verify ::   [{i}] {trimmed}{ellipsis}");
+    }
+    if stored > 0 {
+        let verdict = if listed == stored {
+            "MATCH"
+        } else {
+            "MISMATCH"
+        };
+        println!("MEMORY_LIST verify :: listed {listed} vs ingest-stored {stored} => {verdict}");
+    }
+    assert!(
+        listed > 0,
+        "MEMORY_LIST verify :: conversation {conv_key} listed 0 memories after drain"
+    );
 }
 
 /// Capture the extracted typed-graph for each stored memory. For every

@@ -53,6 +53,7 @@ async fn run(endpoint: SocketAddr) -> Result<ScenarioOutcome, HarnessError> {
             valid_from_unix_nanos: now,
             valid_to_unix_nanos: 0,
             request_id: new_id(),
+            act_as: None,
         })
         .await?;
     let relation_id = created.relation_id;
@@ -76,6 +77,7 @@ async fn run(endpoint: SocketAddr) -> Result<ScenarioOutcome, HarnessError> {
             include_tombstoned: false,
             limit: 1000,
             cursor: Vec::new(),
+            act_as: None,
         })
         .await?;
     let in_from = from_list.iter().any(|r| {
@@ -94,6 +96,7 @@ async fn run(endpoint: SocketAddr) -> Result<ScenarioOutcome, HarnessError> {
             include_tombstoned: false,
             limit: 1000,
             cursor: Vec::new(),
+            act_as: None,
         })
         .await?;
     let in_to = to_list.iter().any(|r| {
@@ -140,6 +143,7 @@ async fn make_person(h: &BrainEvalHarness, canonical: &str) -> Result<[u8; 16], 
             aliases: Vec::new(),
             attributes_blob: Vec::new(),
             request_id: new_id(),
+            act_as: None,
         })
         .await?
         .entity_id)

@@ -358,6 +358,9 @@ fn encode_req(text: &str, request_id: [u8; 16]) -> EncodeRequest {
         request_id,
         txn_id: None,
         occurred_at_unix_nanos: None,
+        act_as: None,
+        wait: brain_db_sdk::wire::types::WaitMode::Ack,
+        allow_duplicates: false,
     }
 }
 
@@ -367,6 +370,7 @@ fn forget_req(memory_id: u128, mode: ForgetMode) -> ForgetRequest {
         mode,
         request_id: new_id(),
         txn_id: None,
+        act_as: None,
     }
 }
 
@@ -380,6 +384,7 @@ fn link_req(source: u128, target: u128) -> LinkRequest {
         weight: 0.5,
         request_id: new_id(),
         txn_id: None,
+        act_as: None,
     }
 }
 

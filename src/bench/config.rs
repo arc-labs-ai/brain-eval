@@ -64,6 +64,16 @@ pub struct RunConfig {
     /// Admin listener port on the endpoint host. `BRAIN_EVAL_ADMIN_PORT`,
     /// default `9092`.
     pub admin_port: u16,
+    /// When set, restrict the run to instances whose `conversation_id`
+    /// equals this value (applied before grouping, so only that
+    /// conversation's haystack is ingested). `None` runs every
+    /// conversation. `BRAIN_EVAL_ONLY_CONVERSATION`.
+    pub only_conversation: Option<String>,
+    /// When true, after each conversation's drain barrier completes,
+    /// enumerate that conversation's memories via `MEMORY_LIST` on the same
+    /// authenticated agent, print a summary, and assert the listed count is
+    /// > 0. `BRAIN_EVAL_VERIFY_MEMORY_LIST`.
+    pub verify_memory_list: bool,
 }
 
 impl RunConfig {
@@ -82,6 +92,8 @@ impl RunConfig {
             namespace: DEFAULT_NAMESPACE.to_string(),
             admin_secret: None,
             admin_port: DEFAULT_ADMIN_PORT,
+            only_conversation: None,
+            verify_memory_list: false,
         }
     }
 
@@ -169,6 +181,18 @@ impl RunConfig {
             .and_then(|p| p.parse::<u16>().ok())
             .unwrap_or(DEFAULT_ADMIN_PORT);
 
+        let only_conversation = std::env::var("BRAIN_EVAL_ONLY_CONVERSATION")
+            .ok()
+            .filter(|s| !s.is_empty());
+        let verify_memory_list = matches!(
+            std::env::var("BRAIN_EVAL_VERIFY_MEMORY_LIST")
+                .unwrap_or_default()
+                .trim()
+                .to_ascii_lowercase()
+                .as_str(),
+            "1" | "true" | "yes" | "on"
+        );
+
         Ok(Self {
             endpoint,
             max_questions,
@@ -181,6 +205,8 @@ impl RunConfig {
             namespace,
             admin_secret,
             admin_port,
+            only_conversation,
+            verify_memory_list,
         })
     }
 

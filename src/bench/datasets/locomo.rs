@@ -237,8 +237,7 @@ impl LocomoSample {
                             // Also pass the date as a structured event time so
                             // the server anchors relative dates in the utterance
                             // ("yesterday") to the message date, not ingest time.
-                            let occurred_at_unix_nanos =
-                                when.and_then(parse_locomo_datetime);
+                            let occurred_at_unix_nanos = when.and_then(parse_locomo_datetime);
                             TurnRecord {
                                 role: "user".to_owned(),
                                 content,
@@ -313,7 +312,7 @@ pub fn parse_locomo_datetime(s: &str) -> Option<u64> {
         return None;
     }
 
-    if day < 1 || day > 31 || !(1..=12).contains(&month) {
+    if !(1..=31).contains(&day) || !(1..=12).contains(&month) {
         return None;
     }
 
@@ -351,7 +350,7 @@ fn month_from_name(name: &str) -> Option<u32> {
 fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
     let y = if month <= 2 { year - 1 } else { year };
     let era = if y >= 0 { y } else { y - 399 } / 400;
-    let yoe = (y - era * 400) as i64; // [0, 399]
+    let yoe = y - era * 400; // [0, 399]
     let m = i64::from(month);
     let d = i64::from(day);
     let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1; // [0, 365]

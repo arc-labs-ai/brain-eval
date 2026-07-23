@@ -84,6 +84,7 @@ async fn run(endpoint: SocketAddr) -> Result<ScenarioOutcome, HarnessError> {
                 entity_type_hint: PERSON_TYPE_ID,
                 allow_create: false,
                 request_id: new_id(),
+                act_as: None,
             })
             .await?;
         if resolved.outcome == ResolutionOutcomeWire::Resolved
@@ -112,6 +113,7 @@ async fn run(endpoint: SocketAddr) -> Result<ScenarioOutcome, HarnessError> {
                 include_merged: false,
                 limit: 1000,
                 cursor: Vec::new(),
+                act_as: None,
             })
             .await?;
         if listed

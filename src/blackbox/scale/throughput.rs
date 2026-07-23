@@ -529,6 +529,7 @@ async fn run_one(client: &BrainClient, plan: &WorkerPlan, seq: u64) -> Result<()
                 entity_type_hint: PERSON_TYPE_ID,
                 allow_create: false,
                 request_id: new_id(),
+                act_as: None,
             };
             client.resolve_entity(&req).await?;
             Ok(())
@@ -548,6 +549,7 @@ async fn run_one(client: &BrainClient, plan: &WorkerPlan, seq: u64) -> Result<()
                 event_at_unix_nanos: 0,
                 schema_version: 0,
                 request_id: new_id(),
+                act_as: None,
             };
             client.create_statement(&req).await?;
             Ok(())
@@ -564,6 +566,7 @@ async fn run_one(client: &BrainClient, plan: &WorkerPlan, seq: u64) -> Result<()
                 valid_from_unix_nanos: unix_nanos_now().saturating_add(seq),
                 valid_to_unix_nanos: 0,
                 request_id: new_id(),
+                act_as: None,
             };
             client.create_relation(&req).await?;
             Ok(())
@@ -593,6 +596,7 @@ async fn create_entity(client: &BrainClient, name: &str) -> Result<[u8; 16], Bra
             aliases: Vec::new(),
             attributes_blob: Vec::new(),
             request_id: new_id(),
+            act_as: None,
         })
         .await?;
     Ok(resp.entity_id)

@@ -226,5 +226,8 @@ fn encode_req(text: &str) -> EncodeRequest {
         request_id: new_id(),
         txn_id: None,
         occurred_at_unix_nanos: None,
+        act_as: None,
+        wait: brain_db_sdk::wire::types::WaitMode::Ack,
+        allow_duplicates: false,
     }
 }

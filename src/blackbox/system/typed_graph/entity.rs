@@ -43,6 +43,7 @@ async fn run(endpoint: SocketAddr) -> Result<ScenarioOutcome, HarnessError> {
             aliases: vec![format!("Ada {suffix}")],
             attributes_blob: Vec::new(),
             request_id: new_id(),
+            act_as: None,
         })
         .await?;
     let entity_id = created.entity_id;
@@ -57,7 +58,10 @@ async fn run(endpoint: SocketAddr) -> Result<ScenarioOutcome, HarnessError> {
     // --- get by id (fields must round-trip) --------------------------
     let got = h
         .client()
-        .get_entity(&EntityGetRequest { entity_id })
+        .get_entity(&EntityGetRequest {
+            entity_id,
+            act_as: None,
+        })
         .await?;
     if got.entity.entity_id != entity_id {
         h.close().await?;
@@ -97,6 +101,7 @@ async fn run(endpoint: SocketAddr) -> Result<ScenarioOutcome, HarnessError> {
             entity_type_hint: PERSON_TYPE_ID,
             allow_create: false,
             request_id: new_id(),
+            act_as: None,
         })
         .await?;
     if resolved.outcome != ResolutionOutcomeWire::Resolved {
@@ -128,6 +133,7 @@ async fn run(endpoint: SocketAddr) -> Result<ScenarioOutcome, HarnessError> {
             include_merged: false,
             limit: 1000,
             cursor: Vec::new(),
+            act_as: None,
         })
         .await?;
     let appears = listed.iter().any(|it| it.entity.entity_id == entity_id);

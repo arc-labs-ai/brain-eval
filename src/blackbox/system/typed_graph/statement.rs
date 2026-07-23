@@ -49,6 +49,7 @@ async fn run(endpoint: SocketAddr) -> Result<ScenarioOutcome, HarnessError> {
             aliases: Vec::new(),
             attributes_blob: Vec::new(),
             request_id: new_id(),
+            act_as: None,
         })
         .await?
         .entity_id;
@@ -72,6 +73,7 @@ async fn run(endpoint: SocketAddr) -> Result<ScenarioOutcome, HarnessError> {
             event_at_unix_nanos: 0,
             schema_version: 0,
             request_id: new_id(),
+            act_as: None,
         })
         .await?;
     let stmt_id = created.statement_id;
@@ -89,6 +91,7 @@ async fn run(endpoint: SocketAddr) -> Result<ScenarioOutcome, HarnessError> {
         .get_statement(&StatementGetRequest {
             statement_id: stmt_id,
             follow_supersession: false,
+            act_as: None,
         })
         .await?;
     if got.statement.statement_id != stmt_id {
@@ -130,6 +133,7 @@ async fn run(endpoint: SocketAddr) -> Result<ScenarioOutcome, HarnessError> {
             include_tombstoned: false,
             limit: 1000,
             cursor: Vec::new(),
+            act_as: None,
         })
         .await?;
     if !listed.iter().any(|s| s.statement_id == stmt_id) {
@@ -163,6 +167,7 @@ async fn run(endpoint: SocketAddr) -> Result<ScenarioOutcome, HarnessError> {
             event_at_unix_nanos: 0,
             schema_version: 0,
             request_id: new_id(),
+            act_as: None,
         })
         .await?;
 
