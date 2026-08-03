@@ -10,9 +10,9 @@
 //! | [`datasets`]  | Which benchmarks do we know how to load? (DMR, LongMemEval-S, LoCoMo, smoke, plus the compiled-in lexical/paraphrase/supersession stress sets) |
 //! | [`score`]     | How do we score answers? (heuristic + `live-llm` judge, retrieval/latency/context-recall metrics) |
 //! | [`report`]    | What does the output look like?                  |
-//! | `config`, `agent_manifest`, `synthesize`, `runner` | How does a run happen? (config, per-agent probing, answer synthesis, orchestration) |
+//! | `config`, `space_manifest`, `synthesize`, `runner` | How does a run happen? (config, per-space probing, answer synthesis, orchestration) |
 
-pub mod agent_manifest;
+pub mod space_manifest;
 pub mod config;
 pub mod core;
 pub mod datasets;

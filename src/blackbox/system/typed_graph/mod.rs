@@ -10,7 +10,7 @@
 //! from colliding on persistent, additive typed-graph state:
 //!
 //! - Markers (entity / statement names) are suffixed with the hex of a
-//!   fresh agent id, like the cognitive scenarios.
+//!   fresh space id, like the cognitive scenarios.
 //! - Schema namespaces are suffixed with that same hex, because
 //!   `SCHEMA_UPLOAD` is additive and persists across the run.
 //!

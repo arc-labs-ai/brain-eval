@@ -27,9 +27,14 @@ pub async fn schema_lifecycle(endpoint: SocketAddr) -> ScenarioOutcome {
 }
 
 async fn run(endpoint: SocketAddr) -> Result<ScenarioOutcome, HarnessError> {
-    let h = BrainEvalHarness::connect(endpoint).await?;
     // Unique namespace per run — SCHEMA_UPLOAD is additive + persistent.
-    let ns = format!("e2_{}", &hex16(h.agent_id())[..12]);
+    // Derive it from the space id *before* connecting: the key has to be
+    // minted into this namespace, because Brain authorizes the upload
+    // against the namespace the key is bound to (a default `eval` key
+    // uploading to `e2_…` is a PermissionDenied).
+    let space_id = brain_db_sdk::new_id();
+    let ns = format!("e2_{}", &hex16(space_id)[..12]);
+    let h = BrainEvalHarness::connect_in_namespace(endpoint, space_id, ns.clone()).await?;
 
     // A well-formed schema: one entity type, one predicate, one relation
     // type. `define` is the real DSL keyword (the SDK mock tests use a

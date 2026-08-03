@@ -54,7 +54,7 @@ pub async fn run_staged(
     minter: &KeyMinter,
     endpoint: std::net::SocketAddr,
     metrics_addr: Option<std::net::SocketAddr>,
-    reuse_agent: Option<[u8; 16]>,
+    reuse_space: Option<[u8; 16]>,
     benchmark: &dyn Benchmark,
     max_questions: Option<usize>,
 ) -> Result<bool, ProbeError> {
@@ -68,7 +68,7 @@ pub async fn run_staged(
     // temporal/derived golds need the LLM judge to be scored fairly.
     let judge = crate::bench::score::judge::Judge::from_env();
     println!("  judge    : {}", judge.describe());
-    if reuse_agent.is_some() {
+    if reuse_space.is_some() {
         println!("  mode     : reads-only (reusing a prior ingest; no write)");
     }
     println!();
@@ -94,17 +94,17 @@ pub async fn run_staged(
         if max_questions.is_some_and(|m| asked >= m) {
             break;
         }
-        // Reuse the given agent id (reads-only against a prior ingest) or a
+        // Reuse the given space id (reads-only against a prior ingest) or a
         // fresh one (normal write+read). Data is scoped per (namespace,
-        // agent), so the reuse id must match the run that wrote the data.
-        let agent_id = reuse_agent.unwrap_or_else(brain_db_sdk::new_id);
-        // Print the agent id so a write-then-keep run surfaces the id needed
-        // for a later reads-only reuse (BRAIN_EVAL_REUSE_AGENT=<id>).
+        // space), so the reuse id must match the run that wrote the data.
+        let space_id = reuse_space.unwrap_or_else(brain_db_sdk::new_id);
+        // Print the space id so a write-then-keep run surfaces the id needed
+        // for a later reads-only reuse (BRAIN_EVAL_REUSE_SPACE=<id>).
         println!(
-            "  agent    : {}",
-            uuid::Uuid::from_bytes(agent_id).hyphenated()
+            "  space    : {}",
+            uuid::Uuid::from_bytes(space_id).hyphenated()
         );
-        let harness = BrainEvalHarness::connect_minted(minter, endpoint, agent_id).await?;
+        let harness = BrainEvalHarness::connect_minted(minter, endpoint, space_id).await?;
 
         // Focused tracer: dump every read stage for one question, then stop.
         // Skips the yield count + the rest of the reads.
@@ -128,7 +128,7 @@ pub async fn run_staged(
             .collect();
         let turns = turn_texts.len();
 
-        let write_line = if reuse_agent.is_some() {
+        let write_line = if reuse_space.is_some() {
             // ---- reads-only: the write happened in a prior run; skip ingest
             // + drain and just count the graph that is already there. ----
             let yld = drain_and_count(&harness, &turn_texts).await?;
@@ -195,11 +195,11 @@ pub async fn run_staged(
         println!();
         report.push('\n');
 
-        // Reads-only reuse targets ONE conversation (the agent that was
-        // ingested). Later groups would reuse the same agent, which holds no
+        // Reads-only reuse targets ONE conversation (the space that was
+        // ingested). Later groups would reuse the same space, which holds no
         // data for them — so stop after the reused conversation rather than
         // reporting spurious misses.
-        if reuse_agent.is_some() {
+        if reuse_space.is_some() {
             break;
         }
     }

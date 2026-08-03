@@ -120,7 +120,7 @@ async fn monotone_recall_distinctive_fact() {
 }
 
 /// INVARIANT 3 — IRRELEVANCE INSENSITIVITY: adding unrelated memories does not
-/// drop the answer to an unrelated query. Two isolated agents: base vs
+/// drop the answer to an unrelated query. Two isolated spaces: base vs
 /// base+noise; the gold memory must surface in both.
 #[tokio::test]
 #[ignore]

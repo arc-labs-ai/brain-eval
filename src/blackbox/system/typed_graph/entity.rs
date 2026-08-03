@@ -31,13 +31,14 @@ pub async fn entity_lifecycle(endpoint: SocketAddr) -> ScenarioOutcome {
 async fn run(endpoint: SocketAddr) -> Result<ScenarioOutcome, HarnessError> {
     let h = BrainEvalHarness::connect(endpoint).await?;
     // Unique canonical name so repeated runs mint distinct entities.
-    let suffix = &hex16(h.agent_id())[..12];
+    let suffix = &hex16(h.space_id())[..12];
     let canonical = format!("Ada Lovelace {suffix}");
 
     // --- create ------------------------------------------------------
     let created = h
         .client()
         .create_entity(&EntityCreateRequest {
+            session_id: 0,
             entity_type_id: PERSON_TYPE_ID,
             canonical_name: canonical.clone(),
             aliases: vec![format!("Ada {suffix}")],
@@ -97,7 +98,7 @@ async fn run(endpoint: SocketAddr) -> Result<ScenarioOutcome, HarnessError> {
         .client()
         .resolve_entity(&EntityResolveRequest {
             candidate_name: canonical.clone(),
-            context: String::new(),
+            resolution_context: String::new(),
             entity_type_hint: PERSON_TYPE_ID,
             allow_create: false,
             request_id: new_id(),

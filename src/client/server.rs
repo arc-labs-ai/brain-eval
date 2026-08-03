@@ -255,7 +255,7 @@ impl ServerHandle {
         };
         // Bind the admin plane to the container's external interface (it
         // defaults to loopback) and gate it with a known secret, so the eval
-        // can mint per-agent data-plane keys through the published port. The
+        // can mint per-space data-plane keys through the published port. The
         // admin listener is fail-closed: it refuses to start without a token.
         let admin_addr_env = "BRAIN__SERVER__ADMIN_ADDR=0.0.0.0:9092".to_string();
         let admin_token_env = format!("BRAIN__ADMIN__TOKEN={EVAL_ADMIN_SECRET}");
@@ -362,7 +362,7 @@ impl ServerHandle {
     }
 
     /// A [`KeyMinter`] bound to this server's admin plane and tenant
-    /// namespace. Use it to mint per-agent data-plane keys before connecting.
+    /// namespace. Use it to mint per-space data-plane keys before connecting.
     #[must_use]
     pub fn key_minter(&self) -> KeyMinter {
         KeyMinter::new(

@@ -1,12 +1,19 @@
-//! Statement scenario: create Fact → get → list → supersession.
+//! Statement scenario: create Preference → get → list → supersession.
 //!
 //! Exercises §19/06 "statement lifecycle". Creates a Person subject, then
-//! a `brain:current_role` Fact (a `stateful` predicate whose object is
-//! `Value<text>`), reads it back by id, lists statements for the subject,
-//! and finally creates a second `current_role` Fact to drive the
-//! auto-supersession path — the stateful predicate makes the new
+//! a `brain:behavior_tone` Preference (a `stateful` predicate whose object
+//! is `Value<text>`), reads it back by id, lists statements for the
+//! subject, and finally creates a second `behavior_tone` Preference to
+//! drive the auto-supersession path — the stateful predicate makes the new
 //! statement supersede the prior one (response carries `auto_superseded`
 //! + `chain_root`).
+//!
+//! The predicate must be one the *system* schema declares: the server
+//! rejects an undeclared `brain:` predicate with `PredicateNotInSchema`.
+//! `crates/brain-metadata/src/system_schema/schema.brain` declares exactly
+//! five stateful predicates and all are `kind: Preference`, so the kind
+//! here must match — a `Fact` on a Preference predicate is not the shape
+//! the schema describes.
 //!
 //! There is no dedicated "supersede statement" SDK verb; supersession is
 //! exercised implicitly via a second create on the stateful predicate.
@@ -25,10 +32,11 @@ use crate::blackbox::system::hex16;
 use crate::client::harness::{BrainEvalHarness, HarnessError};
 
 const NAME: &str = "tg_statement_lifecycle";
-/// `brain:current_role` is seeded `stateful: true`, object `Value<text>`.
-const PREDICATE: &str = "brain:current_role";
+/// `brain:behavior_tone` is declared `stateful: true`, object `Value<text>`
+/// in the system schema. Stateful predicates are what drive supersession.
+const PREDICATE: &str = "brain:behavior_tone";
 
-/// Create a Fact statement, get + list it, then supersede it.
+/// Create a Preference statement, get + list it, then supersede it.
 pub async fn statement_lifecycle(endpoint: SocketAddr) -> ScenarioOutcome {
     match run(endpoint).await {
         Ok(o) => o,
@@ -38,12 +46,13 @@ pub async fn statement_lifecycle(endpoint: SocketAddr) -> ScenarioOutcome {
 
 async fn run(endpoint: SocketAddr) -> Result<ScenarioOutcome, HarnessError> {
     let h = BrainEvalHarness::connect(endpoint).await?;
-    let suffix = &hex16(h.agent_id())[..12];
+    let suffix = &hex16(h.space_id())[..12];
 
     // --- subject entity ----------------------------------------------
     let subject = h
         .client()
         .create_entity(&EntityCreateRequest {
+            session_id: 0,
             entity_type_id: PERSON_TYPE_ID,
             canonical_name: format!("Grace Hopper {suffix}"),
             aliases: Vec::new(),
@@ -56,15 +65,16 @@ async fn run(endpoint: SocketAddr) -> Result<ScenarioOutcome, HarnessError> {
 
     let now = unix_nanos_now();
 
-    // --- create a Fact statement -------------------------------------
-    let role_a = format!("Rear Admiral {suffix}");
+    // --- create a Preference statement -------------------------------
+    let tone_a = format!("concise {suffix}");
     let created = h
         .client()
         .create_statement(&StatementCreateRequest {
-            kind: StatementKindWire::Fact,
+            session_id: 0,
+            kind: StatementKindWire::Preference,
             subject,
             predicate: PREDICATE.to_string(),
-            object: StatementObjectWire::Value(StatementValueWire::Text(role_a.clone())),
+            object: StatementObjectWire::Value(StatementValueWire::Text(tone_a.clone())),
             confidence: 0.95,
             evidence: EvidenceRefWire::Inline(Vec::new()),
             extractor_id: 0,
@@ -148,17 +158,18 @@ async fn run(endpoint: SocketAddr) -> Result<ScenarioOutcome, HarnessError> {
     }
 
     // --- supersession: a second create on the stateful predicate -----
-    // `brain:current_role` is stateful, so the new statement supersedes
+    // `brain:behavior_tone` is stateful, so the new statement supersedes
     // the first; the response reports the auto-superseded prior id and a
     // non-zero chain root.
-    let role_b = format!("Commodore {suffix}");
+    let tone_b = format!("verbose {suffix}");
     let superseding = h
         .client()
         .create_statement(&StatementCreateRequest {
-            kind: StatementKindWire::Fact,
+            session_id: 0,
+            kind: StatementKindWire::Preference,
             subject,
             predicate: PREDICATE.to_string(),
-            object: StatementObjectWire::Value(StatementValueWire::Text(role_b)),
+            object: StatementObjectWire::Value(StatementValueWire::Text(tone_b)),
             confidence: 0.97,
             evidence: EvidenceRefWire::Inline(Vec::new()),
             extractor_id: 0,
@@ -196,7 +207,7 @@ async fn run(endpoint: SocketAddr) -> Result<ScenarioOutcome, HarnessError> {
     Ok(ScenarioOutcome::pass(
         NAME,
         format!(
-            "§19/06 statement: created Fact {PREDICATE}, get round-trips, appears in list \
+            "§19/06 statement: created Preference {PREDICATE}, get round-trips, appears in list \
              ({} rows), stateful re-create auto-superseded the prior + linked a chain root",
             listed.len()
         ),

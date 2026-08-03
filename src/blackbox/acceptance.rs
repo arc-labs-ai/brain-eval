@@ -292,7 +292,7 @@ pub async fn run_acceptance(cfg: AcceptanceConfig) -> AcceptanceReport {
             }
 
             // --- recall quality (correctness gate) -------------------
-            let salt = hex16(harness.agent_id());
+            let salt = hex16(harness.space_id());
             match run_recall_quality(
                 harness.client(),
                 cfg.recall_n,
@@ -424,7 +424,7 @@ mod tests {
             gates: vec![
                 gate("latency:recall", true, false), // perf fail
                 gate("recall_quality", false, true),
-                gate("multi_agent_isolation", false, true),
+                gate("multi_space_isolation", false, true),
             ],
         };
         assert!(r.correctness_pass(), "perf fail must not sink correctness");

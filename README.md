@@ -9,7 +9,7 @@ A client-side rig that talks to a running `brain-server` over the wire (via `bra
 | Layer | Purpose |
 |---|---|
 | `Benchmark` trait | One impl per dataset: `SmokeBenchmark`, `DmrBenchmark`, `LongMemEvalS`, `LocomoBenchmark`, plus the compiled-in `LexicalStressBenchmark` / `ParaphraseStressBenchmark` / `SupersessionStressBenchmark` (no-download anti-overfit sets). BEAM (1M–10M scale) is a follow-up. |
-| `BrainEvalHarness` | Wraps `brain_db_sdk::BrainClient` with `ingest()` + `recall()` helpers. One harness = one `AgentId` = full data-level isolation from other questions. Auth is mandatory server-side, so the harness mints its own data-plane key via `KeyMinter` before connecting. |
+| `BrainEvalHarness` | Wraps `brain_db_sdk::BrainClient` with `ingest()` + `recall()` helpers. One harness = one `SpaceId` = full data-level isolation from other questions. Auth is mandatory server-side, so the harness mints its own data-plane key via `KeyMinter` before connecting. |
 | `EvalRunner` | Loops over instances, drives the harness, calls the judge, aggregates metrics, writes reports. |
 | Heuristic judge | Substring + token-overlap scoring against ground truth. Honest for fact benchmarks; a directional signal for multi-hop. Always available, feature-independent. |
 | `live-llm` feature | A real LLM-as-judge + answer-synthesis path (`src/llm.rs`, `src/bench/score/llm_judge.rs`, `src/bench/score/judge_prompt.rs`) — not a stub. Off by default (real API calls cost money); falls back to the heuristic judge when disabled or no key is configured. |
@@ -62,7 +62,7 @@ one path entry.
 
 Brain requires a per-connection API key — there is no anonymous connect,
 for any run, on any judge. The eval **mints** a data-plane key for
-`(namespace, agent)` through the server's admin HTTP listener, then
+`(namespace, space)` through the server's admin HTTP listener, then
 connects with it. Every command in [Quick start](#quick-start) and
 [Running LongMemEval-S end to end](#running-longmemeval-s-end-to-end)
 below assumes this is set up.
@@ -316,7 +316,7 @@ brain-eval/
 │   │
 │   ├── bench/                     — surface (A): per-question dataset benchmarking
 │   │   ├── config.rs              — RunConfig + env vars + ReporterKind
-│   │   ├── agent_manifest.rs      — persist/reload the per-conversation AgentId manifest
+│   │   ├── space_manifest.rs      — persist/reload the per-conversation SpaceId manifest
 │   │   ├── synthesize.rs          — top-K → candidate answer
 │   │   ├── runner.rs              — EvalRunner orchestration
 │   │   │
@@ -394,8 +394,8 @@ brain-eval/
 | `BRAIN_EVAL_OUTPUT_DIR` | `target/eval-reports` | Where reports land. |
 | `BRAIN_EVAL_FORMATS` | `json,text` | Comma list of `json` / `text`. |
 | `BRAIN_EVAL_QUESTION_TYPES` | _(unset = all)_ | Comma list restricting the run to specific question-type tags (e.g. `single_hop`). |
-| `BRAIN_EVAL_PERSIST_AGENTS` | _(unset)_ | Write the per-conversation `agent_id` manifest here during an ingesting run. |
-| `BRAIN_EVAL_READ_ONLY_AGENTS` | _(unset)_ | Skip ingest; reconnect to the agents in this manifest and only retrieve/judge. |
+| `BRAIN_EVAL_PERSIST_SPACES` | _(unset)_ | Write the per-conversation `space_id` manifest here during an ingesting run. |
+| `BRAIN_EVAL_READ_ONLY_SPACES` | _(unset)_ | Skip ingest; reconnect to the spaces in this manifest and only retrieve/judge. |
 | `BRAIN_EVAL_ADMIN_SECRET` | _(unset)_ | Admin bearer secret — **required** to mint data-plane keys against an **external** server; must equal the server's own `BRAIN__ADMIN__TOKEN` (the docker-boot harness sets this itself). See [Authentication](#authentication-mandatory). |
 | `BRAIN_EVAL_ADMIN_PORT` | `9092` | Admin listener port on the endpoint host. |
 | `BRAIN_EVAL_NAMESPACE` | `eval` | Tenant namespace minted keys bind to. |
@@ -482,10 +482,10 @@ Category mapping: `1 → SingleHop`, `2 → MultiHop`, `3 → Temporal`, `4 → 
 
 ## Design notes
 
-- **Per-question agent isolation.** Each `EvalRunner` group spins up a fresh `BrainEvalHarness` with a fresh `AgentId`. Brain routes by `BLAKE3(agent_uuid) mod shard_count`, so two harnesses with different agent ids touch independent slices of substrate state. This is the natural isolation primitive for benchmark questions — no "scope" or "namespace" wrapper needed.
+- **Per-question space isolation.** Each `EvalRunner` group spins up a fresh `BrainEvalHarness` with a fresh `SpaceId`. Brain routes by `BLAKE3(space_uuid) mod shard_count`, so two harnesses with different space ids touch independent slices of substrate state. This is the natural isolation primitive for benchmark questions — no "scope" or "namespace" wrapper needed.
 - **Honest numbers.** `BenchmarkMeta.judge_type` records which judge actually scored a run (see [Judges](#judges)), so a run that partially fell back from the LLM judge to the heuristic is never misreported as fully LLM-judged.
 - **No invented features.** Brain's wire today doesn't surface per-request token counts to the SDK, so `tokens_write` and `tokens_read` are zeros until the wire grows the fields. Better an honest zero than an invented number.
-- **Single-shard scope.** Each connection is pinned to one shard at AUTH (spec §12/02). Multi-shard agents are v2; this eval crate runs the v1 single-shard contract.
+- **Single-shard scope.** Each connection is pinned to one shard at AUTH (spec §12/02). Multi-shard spaces are v2; this eval crate runs the v1 single-shard contract.
 
 ## Follow-ups
 

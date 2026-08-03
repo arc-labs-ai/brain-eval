@@ -73,7 +73,7 @@ impl RecallQualityReport {
 }
 
 /// A nonce unique to query `i` within one run, salted by `salt` (use the
-/// connection's agent id hex so reruns don't collide via dedup).
+/// connection's space id hex so reruns don't collide via dedup).
 fn nonce(salt: &str, i: usize) -> String {
     format!("zq{salt}{i:06}xz")
 }

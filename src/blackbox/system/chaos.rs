@@ -62,9 +62,9 @@ pub async fn kill_during_write(opts: DockerServerOpts) -> ScenarioOutcome {
 }
 
 async fn run(opts: DockerServerOpts, _volume: &str) -> Result<ScenarioOutcome, String> {
-    // One agent id for the whole run → one shard slice on the volume.
-    let agent_id = new_id();
-    let marker = format!("chaos-{}", super::hex16(agent_id));
+    // One space id for the whole run → one shard slice on the volume.
+    let space_id = new_id();
+    let marker = format!("chaos-{}", super::hex16(space_id));
     let mut acked: Vec<(u128, String)> = Vec::new();
     let mut next_index = 0usize;
 
@@ -75,11 +75,11 @@ async fn run(opts: DockerServerOpts, _volume: &str) -> Result<ScenarioOutcome, S
             .await
             .map_err(|e| format!("cycle {cycle}: boot: {e}"))?;
 
-        // Mint this boot's data-plane key for the single agent. The admin
+        // Mint this boot's data-plane key for the single space. The admin
         // plane is fresh each boot, so we re-mint after every restart.
         let token = server
             .key_minter()
-            .mint(agent_id)
+            .mint(space_id)
             .await
             .map_err(|e| format!("cycle {cycle}: mint: {e}"))?;
 
@@ -129,7 +129,7 @@ async fn run(opts: DockerServerOpts, _volume: &str) -> Result<ScenarioOutcome, S
         .map_err(|e| format!("final boot: {e}"))?;
     let token = server
         .key_minter()
-        .mint(agent_id)
+        .mint(space_id)
         .await
         .map_err(|e| format!("final mint: {e}"))?;
     let survived = count_survivors(server.endpoint(), &token, &marker, &acked)
@@ -222,7 +222,7 @@ fn client_config(token: &str) -> ClientConfig {
 fn encode_req(text: &str) -> EncodeRequest {
     EncodeRequest {
         text: text.to_string(),
-        context_id: 0,
+        session_id: 0,
         request_id: new_id(),
         txn_id: None,
         occurred_at_unix_nanos: None,

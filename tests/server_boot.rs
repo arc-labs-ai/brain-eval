@@ -42,9 +42,9 @@ async fn start_docker_boots_a_usable_server() {
 
     // Drive a real round-trip through the harness against the booted server.
     // Mint a data-plane key through the booted server's admin plane.
-    let agent_id = brain_db_sdk::new_id();
+    let space_id = brain_db_sdk::new_id();
     let harness =
-        BrainEvalHarness::connect_minted(&server.key_minter(), server.endpoint(), agent_id)
+        BrainEvalHarness::connect_minted(&server.key_minter(), server.endpoint(), space_id)
             .await
             .expect("connect to booted server");
 

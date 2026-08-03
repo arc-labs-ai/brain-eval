@@ -236,10 +236,10 @@ async fn probe_cmd(benchmark: Option<&str>, external_endpoint: Option<SocketAddr
         }
     };
 
-    // Reads-only reuse: BRAIN_EVAL_REUSE_AGENT=<uuid> targets an
-    // already-ingested agent (skip the write). Pair with --endpoint against
+    // Reads-only reuse: BRAIN_EVAL_REUSE_SPACE=<uuid> targets an
+    // already-ingested space (skip the write). Pair with --endpoint against
     // a kept server.
-    let reuse_agent: Option<[u8; 16]> = std::env::var("BRAIN_EVAL_REUSE_AGENT")
+    let reuse_space: Option<[u8; 16]> = std::env::var("BRAIN_EVAL_REUSE_SPACE")
         .ok()
         .and_then(|s| uuid::Uuid::parse_str(s.trim()).ok())
         .map(uuid::Uuid::into_bytes);
@@ -306,7 +306,7 @@ async fn probe_cmd(benchmark: Option<&str>, external_endpoint: Option<SocketAddr
                 &minter,
                 endpoint,
                 Some(metrics_addr),
-                reuse_agent,
+                reuse_space,
                 b.as_ref(),
                 max_q,
             )
@@ -322,7 +322,7 @@ async fn probe_cmd(benchmark: Option<&str>, external_endpoint: Option<SocketAddr
             println!();
             println!("server kept for reuse (data lives only while it runs):");
             println!(
-                "  reads-only re-run: BRAIN_EVAL_REUSE_AGENT=<agent printed above> \\
+                "  reads-only re-run: BRAIN_EVAL_REUSE_SPACE=<space printed above> \\
     BRAIN_EVAL_ADMIN_SECRET=eval-admin-secret BRAIN_EVAL_ADMIN_PORT=19092 \\
     BRAIN_EVAL_DRAIN_ADMIN_PORT=19091 … probe <bench> --endpoint 127.0.0.1:18080"
             );

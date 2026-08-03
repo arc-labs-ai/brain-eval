@@ -86,7 +86,7 @@ async fn idempotency_request_id(endpoint: SocketAddr) -> ScenarioOutcome {
 
 async fn run_idempotency(endpoint: SocketAddr) -> Result<ScenarioOutcome, HarnessError> {
     let h = BrainEvalHarness::connect(endpoint).await?;
-    let suffix = short_hex(h.agent_id());
+    let suffix = short_hex(h.space_id());
     let rid = new_id();
     let text = format!("Idempotent memory {suffix} alpha");
 
@@ -155,7 +155,7 @@ async fn tombstone_visibility(endpoint: SocketAddr) -> ScenarioOutcome {
 
 async fn run_tombstone(endpoint: SocketAddr) -> Result<ScenarioOutcome, HarnessError> {
     let h = BrainEvalHarness::connect(endpoint).await?;
-    let suffix = short_hex(h.agent_id());
+    let suffix = short_hex(h.space_id());
 
     // --- soft FORGET --------------------------------------------------
     let soft_token = format!("Zoltraxian{suffix}");
@@ -262,7 +262,7 @@ async fn slot_version_stale_id(endpoint: SocketAddr) -> ScenarioOutcome {
 
 async fn run_slot_version(endpoint: SocketAddr) -> Result<ScenarioOutcome, HarnessError> {
     let h = BrainEvalHarness::connect(endpoint).await?;
-    let suffix = short_hex(h.agent_id());
+    let suffix = short_hex(h.space_id());
 
     // A real source and a real target; LINK resolves both by full MemoryId
     // key. The metadata table is keyed by the whole 16-byte id (version
@@ -354,7 +354,7 @@ async fn run_slot_version(endpoint: SocketAddr) -> Result<ScenarioOutcome, Harne
 fn encode_req(text: &str, request_id: [u8; 16]) -> EncodeRequest {
     EncodeRequest {
         text: text.to_string(),
-        context_id: 0,
+        session_id: 0,
         request_id,
         txn_id: None,
         occurred_at_unix_nanos: None,

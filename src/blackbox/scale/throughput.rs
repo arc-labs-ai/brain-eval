@@ -10,9 +10,9 @@
 //! This module drives **N independent connections** concurrently against a
 //! single shard for a fixed wall-clock window and reports the achieved
 //! aggregate ops/s — the number group commit is designed to lift. All
-//! connections bind the **same agent id**, so the load lands on one shard
+//! connections bind the **same space id**, so the load lands on one shard
 //! (the spec's single-shard throughput target, §19/02) rather than being
-//! smeared across the shard set by per-connection agent routing.
+//! smeared across the shard set by per-connection space routing.
 //!
 //! ## Two signals, two gate tiers
 //!
@@ -268,7 +268,7 @@ fn yn(b: bool) -> &'static str {
 }
 
 /// Drive each configured verb concurrently and collect a report. All
-/// connections bind one fresh agent id so the load lands on one shard.
+/// connections bind one fresh space id so the load lands on one shard.
 /// Per-verb failures are folded into the report (never aborting the run),
 /// so the `Result` is always `Ok`; the signature is kept for API symmetry.
 pub async fn run_concurrent_throughput(
@@ -276,10 +276,10 @@ pub async fn run_concurrent_throughput(
     endpoint: SocketAddr,
     cfg: &ConcurrentConfig,
 ) -> Result<ConcurrentReport, HarnessError> {
-    // All connections share one agent (one shard slice), so they all present
+    // All connections share one space (one shard slice), so they all present
     // the same minted token.
-    let agent_id = new_id();
-    let token = minter.mint(agent_id).await?;
+    let space_id = new_id();
+    let token = minter.mint(space_id).await?;
     let mut results = Vec::with_capacity(cfg.verbs.len());
     for (i, verb) in cfg.verbs.iter().enumerate() {
         // Let the shard drain the previous verb's in-flight work so each
@@ -427,7 +427,7 @@ async fn prepare(
         TputVerb::Encode => Ok(Prepared::Shared(WorkerPlan::Encode)),
 
         TputVerb::EntityResolve => {
-            let name = format!("Resolve Target {}", short_hex(client.agent_id()));
+            let name = format!("Resolve Target {}", short_hex(client.space_id()));
             create_entity(client, &name).await?;
             Ok(Prepared::Resolve(name))
         }
@@ -435,7 +435,7 @@ async fn prepare(
         TputVerb::StatementCreate => {
             let mut subjects = Vec::with_capacity(cfg.clients);
             for w in 0..cfg.clients {
-                let name = format!("Stmt Subject {w} {}", short_hex(client.agent_id()));
+                let name = format!("Stmt Subject {w} {}", short_hex(client.space_id()));
                 subjects.push(create_entity(client, &name).await?);
             }
             Ok(Prepared::Statement(subjects))
@@ -446,12 +446,12 @@ async fn prepare(
             for w in 0..cfg.clients {
                 let from = create_entity(
                     client,
-                    &format!("Rel From {w} {}", short_hex(client.agent_id())),
+                    &format!("Rel From {w} {}", short_hex(client.space_id())),
                 )
                 .await?;
                 let to = create_entity(
                     client,
-                    &format!("Rel To {w} {}", short_hex(client.agent_id())),
+                    &format!("Rel To {w} {}", short_hex(client.space_id())),
                 )
                 .await?;
                 pairs.push((from, to));
@@ -517,7 +517,7 @@ async fn worker_loop(
 async fn run_one(client: &BrainClient, plan: &WorkerPlan, seq: u64) -> Result<(), BrainError> {
     match plan {
         WorkerPlan::Encode => {
-            let text = format!("tput encode {} {seq}", short_hex(client.agent_id()));
+            let text = format!("tput encode {} {seq}", short_hex(client.space_id()));
             let req = EncodeBuilder::new(text.as_str()).build();
             client.encode(&req).await?;
             Ok(())
@@ -525,7 +525,7 @@ async fn run_one(client: &BrainClient, plan: &WorkerPlan, seq: u64) -> Result<()
         WorkerPlan::Resolve(name) => {
             let req = EntityResolveRequest {
                 candidate_name: name.clone(),
-                context: String::new(),
+                resolution_context: String::new(),
                 entity_type_hint: PERSON_TYPE_ID,
                 allow_create: false,
                 request_id: new_id(),
@@ -536,6 +536,7 @@ async fn run_one(client: &BrainClient, plan: &WorkerPlan, seq: u64) -> Result<()
         }
         WorkerPlan::Statement(subject) => {
             let req = StatementCreateRequest {
+                session_id: 0,
                 kind: StatementKindWire::Fact,
                 subject: *subject,
                 predicate: STATEMENT_PREDICATE.to_string(),
@@ -556,6 +557,7 @@ async fn run_one(client: &BrainClient, plan: &WorkerPlan, seq: u64) -> Result<()
         }
         WorkerPlan::Relation(from, to) => {
             let req = RelationCreateRequest {
+                session_id: 0,
                 relation_type: RELATION_TYPE.to_string(),
                 from_entity: *from,
                 to_entity: *to,
@@ -579,7 +581,7 @@ fn is_timeout(e: &BrainError) -> bool {
     matches!(e, BrainError::Timeout(_))
 }
 
-/// Connect a fresh client bound to `agent_id`, with the generous load
+/// Connect a fresh client bound to `space_id`, with the generous load
 /// request timeout.
 async fn connect(endpoint: SocketAddr, token: &str) -> Result<BrainClient, BrainError> {
     let mut config = ClientConfig::new(Auth::Token(token.as_bytes().to_vec()));
@@ -591,6 +593,7 @@ async fn connect(endpoint: SocketAddr, token: &str) -> Result<BrainClient, Brain
 async fn create_entity(client: &BrainClient, name: &str) -> Result<[u8; 16], BrainError> {
     let resp = client
         .create_entity(&EntityCreateRequest {
+            session_id: 0,
             entity_type_id: PERSON_TYPE_ID,
             canonical_name: name.to_string(),
             aliases: Vec::new(),

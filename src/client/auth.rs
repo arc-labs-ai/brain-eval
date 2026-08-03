@@ -2,10 +2,10 @@
 //! listener.
 //!
 //! Brain dropped anonymous auth: a connection's whole identity is the
-//! bearer token it presents, and the server resolves `(namespace, agent,
+//! bearer token it presents, and the server resolves `(namespace, space,
 //! permissions)` from it. The eval is a black-box client, so it cannot
 //! fabricate a token — it asks the operator admin plane to mint one bound
-//! to the `(namespace, agent_id)` it wants to drive load as.
+//! to the `(namespace, space_id)` it wants to drive load as.
 //!
 //! The admin plane is separate from `/metrics`: `POST {admin_base}/v1/api-keys`
 //! with `Authorization: Bearer <admin_secret>`. The response carries the
@@ -163,13 +163,27 @@ impl KeyMinter {
         Self::new(admin_base, admin_secret, namespace)
     }
 
+    /// Rebind this minter to `namespace`, leaving the admin plane and
+    /// secret as-is.
+    ///
+    /// Brain authorizes a namespace-scoped write against the namespace the
+    /// *key* is bound to, not one carried on the request. A scenario that
+    /// invents its own namespace (SCHEMA_UPLOAD is additive + persistent,
+    /// so each run uses a fresh one) must therefore mint into that same
+    /// namespace, or the server answers `PermissionDenied`.
+    #[must_use]
+    pub fn with_namespace(mut self, namespace: impl Into<String>) -> Self {
+        self.namespace = namespace.into();
+        self
+    }
+
     /// The namespace every key this minter produces is bound to.
     #[must_use]
     pub fn namespace(&self) -> &str {
         &self.namespace
     }
 
-    /// Mint a data-plane key bound to `(namespace, agent_id)` with `FULL`
+    /// Mint a data-plane key bound to `(namespace, space_id)` with `FULL`
     /// permissions and return its secret token. The token string is what a
     /// client presents over the wire (`Auth::Token(secret.into_bytes())`).
     ///
@@ -178,13 +192,13 @@ impl KeyMinter {
     /// [`MintError::NoSecret`] when no admin secret is configured;
     /// [`MintError::Transport`] / [`MintError::Status`] /
     /// [`MintError::BadResponse`] for admin-plane failures.
-    pub async fn mint(&self, agent_id: [u8; 16]) -> Result<String, MintError> {
+    pub async fn mint(&self, space_id: [u8; 16]) -> Result<String, MintError> {
         if self.admin_secret.is_empty() {
             return Err(MintError::NoSecret);
         }
         let url = format!("{}/v1/api-keys", self.admin_base);
         let body = serde_json::json!({
-            "agent_id_hex": hex_lower(&agent_id),
+            "space_id_hex": hex_lower(&space_id),
             "namespace": self.namespace,
             "permissions": ["FULL"],
         });

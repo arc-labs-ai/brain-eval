@@ -1,10 +1,10 @@
 //! `BrainEvalHarness` — the eval-side wrapper around
 //! [`brain_db_sdk::BrainClient`].
 //!
-//! Each harness instance owns one client bound to a fresh agent id.
+//! Each harness instance owns one client bound to a fresh space id.
 //! Per-test isolation is achieved by spawning a new harness per scope —
-//! every agent maps to its own shard slice, so agent A's memories are
-//! never visible to agent B (Brain's natural routing rule).
+//! every space maps to its own shard slice, so space A's memories are
+//! never visible to space B (Brain's natural routing rule).
 //!
 //! Two methods cover the eval surface:
 //!
@@ -46,68 +46,87 @@ pub enum HarnessError {
     Mint(#[from] MintError),
 }
 
-/// One driver bound to one agent.
+/// One driver bound to one space.
 ///
 /// Not `Clone`: the SDK client owns a live connection. A harness drives
 /// one conversation's ingest plus its N per-question recalls through
 /// `&self`, so cloning was never needed.
 pub struct BrainEvalHarness {
     client: BrainClient,
-    agent_id: WireUuid,
+    space_id: WireUuid,
 }
 
 impl BrainEvalHarness {
-    /// Open a fresh connection with a fresh agent id, minting its data-plane
+    /// Open a fresh connection with a fresh space id, minting its data-plane
     /// key against an external server's admin plane (resolved from the
     /// environment — see [`KeyMinter::from_external_env`]). Drives the
     /// HELLO → WELCOME → AUTH → AUTH_OK handshake before returning.
     pub async fn connect(addr: SocketAddr) -> Result<Self, HarnessError> {
-        let agent_id = brain_db_sdk::new_id();
-        Self::connect_with_agent(addr, agent_id).await
+        let space_id = brain_db_sdk::new_id();
+        Self::connect_with_space(addr, space_id).await
     }
 
-    /// Connect with an explicit agent id against an external server, minting
+    /// [`connect_with_space`](Self::connect_with_space), but minting the key
+    /// into `namespace` instead of the environment's default.
+    ///
+    /// For scenarios that operate on a namespace they mint themselves —
+    /// SCHEMA_UPLOAD is additive and persistent, so each run needs a fresh
+    /// one. Brain authorizes a namespace-scoped write against the namespace
+    /// the *key* is bound to, so connecting with the default `eval` key and
+    /// then writing to `e2_<hex>` is a `PermissionDenied`, not a valid
+    /// setup. The space id is taken as an argument because the namespace
+    /// name is usually derived from it.
+    pub async fn connect_in_namespace(
+        addr: SocketAddr,
+        space_id: WireUuid,
+        namespace: impl Into<String>,
+    ) -> Result<Self, HarnessError> {
+        let minter = KeyMinter::from_external_env(addr).with_namespace(namespace);
+        Self::connect_minted(&minter, addr, space_id).await
+    }
+
+    /// Connect with an explicit space id against an external server, minting
     /// its key from the environment. For a server the eval owns, prefer
     /// [`connect_minted`](Self::connect_minted) with the handle's
     /// [`KeyMinter`].
-    pub async fn connect_with_agent(
+    pub async fn connect_with_space(
         addr: SocketAddr,
-        agent_id: WireUuid,
+        space_id: WireUuid,
     ) -> Result<Self, HarnessError> {
         let minter = KeyMinter::from_external_env(addr);
-        Self::connect_minted(&minter, addr, agent_id).await
+        Self::connect_minted(&minter, addr, space_id).await
     }
 
-    /// Mint a data-plane key for `agent_id` through `minter`, then connect
-    /// with it. The agent id is what the key is minted *for* — it rides the
+    /// Mint a data-plane key for `space_id` through `minter`, then connect
+    /// with it. The space id is what the key is minted *for* — it rides the
     /// token, not the client config (Brain assigns identity from auth).
     pub async fn connect_minted(
         minter: &KeyMinter,
         addr: SocketAddr,
-        agent_id: WireUuid,
+        space_id: WireUuid,
     ) -> Result<Self, HarnessError> {
-        let token = minter.mint(agent_id).await?;
-        Self::connect_with_token(addr, agent_id, token).await
+        let token = minter.mint(space_id).await?;
+        Self::connect_with_token(addr, space_id, token).await
     }
 
     /// Connect with an already-minted token. The credential is the
-    /// connection's whole identity; `agent_id` is retained only so callers
-    /// can correlate the harness with the agent its key was minted for.
+    /// connection's whole identity; `space_id` is retained only so callers
+    /// can correlate the harness with the space its key was minted for.
     pub async fn connect_with_token(
         addr: SocketAddr,
-        agent_id: WireUuid,
+        space_id: WireUuid,
         token: String,
     ) -> Result<Self, HarnessError> {
         let mut config = ClientConfig::new(Auth::Token(token.into_bytes()));
         config.request_timeout = Some(REQUEST_TIMEOUT);
         let client = BrainClient::connect_with(addr, config).await?;
-        Ok(Self { client, agent_id })
+        Ok(Self { client, space_id })
     }
 
-    /// The agent id this harness was bound to.
+    /// The space id this harness was bound to.
     #[must_use]
-    pub fn agent_id(&self) -> WireUuid {
-        self.agent_id
+    pub fn space_id(&self) -> WireUuid {
+        self.space_id
     }
 
     /// Borrow the underlying SDK client (escape hatch for tests touching

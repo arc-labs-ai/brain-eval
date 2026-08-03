@@ -70,10 +70,10 @@ async fn run(
         .map_err(|e| format!("baseline scrape: {e}"))?;
     let meta_before = baseline.sum("brain_metadata_size_bytes").unwrap_or(0.0);
 
-    // Ingest n memories under one agent (one shard slice).
-    let agent_id = brain_db_sdk::new_id();
+    // Ingest n memories under one space (one shard slice).
+    let space_id = brain_db_sdk::new_id();
     {
-        let h = BrainEvalHarness::connect_minted(&server.key_minter(), server.endpoint(), agent_id)
+        let h = BrainEvalHarness::connect_minted(&server.key_minter(), server.endpoint(), space_id)
             .await
             .map_err(|e| format!("connect: {e}"))?;
         for i in 0..n {

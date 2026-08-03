@@ -32,7 +32,7 @@ pub async fn relation_lifecycle(endpoint: SocketAddr) -> ScenarioOutcome {
 
 async fn run(endpoint: SocketAddr) -> Result<ScenarioOutcome, HarnessError> {
     let h = BrainEvalHarness::connect(endpoint).await?;
-    let suffix = &hex16(h.agent_id())[..12];
+    let suffix = &hex16(h.space_id())[..12];
 
     let from_entity = make_person(&h, &format!("Alan Turing {suffix}")).await?;
     let to_entity = make_person(&h, &format!("Christopher Morcom {suffix}")).await?;
@@ -43,6 +43,7 @@ async fn run(endpoint: SocketAddr) -> Result<ScenarioOutcome, HarnessError> {
     let created = h
         .client()
         .create_relation(&RelationCreateRequest {
+            session_id: 0,
             relation_type: RELATION_TYPE.to_string(),
             from_entity,
             to_entity,
@@ -138,6 +139,7 @@ async fn run(endpoint: SocketAddr) -> Result<ScenarioOutcome, HarnessError> {
 async fn make_person(h: &BrainEvalHarness, canonical: &str) -> Result<[u8; 16], HarnessError> {
     Ok(h.client()
         .create_entity(&EntityCreateRequest {
+            session_id: 0,
             entity_type_id: PERSON_TYPE_ID,
             canonical_name: canonical.to_string(),
             aliases: Vec::new(),

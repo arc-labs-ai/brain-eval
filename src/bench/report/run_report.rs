@@ -83,11 +83,11 @@ impl RunReport {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RunMode {
-    /// Fresh agents, ingest + read, no manifest written.
+    /// Fresh spaces, ingest + read, no manifest written.
     Ingest,
     /// Reconnect to a prior manifest and read only (no ingest).
     ReadOnly,
-    /// Ingest + read AND record the conversation→agent manifest for reuse.
+    /// Ingest + read AND record the conversation→space manifest for reuse.
     Persist,
 }
 
@@ -97,9 +97,9 @@ impl RunMode {
     /// records the manifest.
     #[must_use]
     pub fn from_config(config: &RunConfig) -> Self {
-        if config.read_only_agents.is_some() {
+        if config.read_only_spaces.is_some() {
             Self::ReadOnly
-        } else if config.persist_agents.is_some() {
+        } else if config.persist_spaces.is_some() {
             Self::Persist
         } else {
             Self::Ingest
@@ -319,8 +319,8 @@ pub struct MemoryExtraction {
 pub struct ConversationWrite {
     /// Conversation grouping key (or the question id for singletons).
     pub conversation_id: String,
-    /// The agent id this conversation was ingested under (hyphenated uuid).
-    pub agent_id: String,
+    /// The space id this conversation was ingested under (hyphenated uuid).
+    pub space_id: String,
     /// Total ingest latency for the conversation, ms.
     pub write_latency_ms: u64,
     /// ENCODE attempts (user turns processed).
@@ -791,7 +791,7 @@ brain_extractor_items_written_total{shard=\"0\",item_kind=\"relation\"} 1
     fn conversation_write_carries_per_memory_extraction() {
         let cw = ConversationWrite {
             conversation_id: "c1".to_owned(),
-            agent_id: "agent".to_owned(),
+            space_id: "space".to_owned(),
             write_latency_ms: 5,
             attempted: 2,
             stored: 2,
@@ -822,7 +822,7 @@ brain_extractor_items_written_total{shard=\"0\",item_kind=\"relation\"} 1
         // A v1 record has neither plan_trace, retrieved[].graph, nor
         // memory_extractions — the new fields must default cleanly.
         let v1 = r#"{
-            "conversation_id": "c1", "agent_id": "a", "write_latency_ms": 1,
+            "conversation_id": "c1", "space_id": "a", "write_latency_ms": 1,
             "attempted": 1, "stored": 1, "deduplicated": 0,
             "stored_memory_ids": ["1"], "ingest_failed": false
         }"#;

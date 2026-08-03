@@ -41,10 +41,10 @@ async fn run(endpoint: SocketAddr) -> Result<ScenarioOutcome, HarnessError> {
     let h = BrainEvalHarness::connect(endpoint).await?;
 
     // A run-unique, two-capitalized-word name the pattern extractor will
-    // match. Built from the agent id so reruns don't collide and the
+    // match. Built from the space id so reruns don't collide and the
     // tokens stay capitalized (the hex marker itself is lowercase and
     // would NOT match the pattern, so we map id bytes to A-Z letters).
-    let full_name = unique_person_name(h.agent_id());
+    let full_name = unique_person_name(h.space_id());
     let text =
         format!("During the project kickoff, {full_name} agreed to lead the migration effort.");
 
@@ -80,7 +80,7 @@ async fn run(endpoint: SocketAddr) -> Result<ScenarioOutcome, HarnessError> {
             .client()
             .resolve_entity(&EntityResolveRequest {
                 candidate_name: full_name.clone(),
-                context: String::new(),
+                resolution_context: String::new(),
                 entity_type_hint: PERSON_TYPE_ID,
                 allow_create: false,
                 request_id: new_id(),
@@ -146,7 +146,7 @@ async fn run(endpoint: SocketAddr) -> Result<ScenarioOutcome, HarnessError> {
     }
 }
 
-/// Build a two-capitalized-word name from an agent id. Maps id bytes to
+/// Build a two-capitalized-word name from an space id. Maps id bytes to
 /// the A-Z range so the tokens are run-unique yet match the seeded
 /// pattern extractor's `[A-Z][a-z]+ [A-Z][a-z]+` shape.
 fn unique_person_name(id: [u8; 16]) -> String {

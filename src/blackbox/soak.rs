@@ -223,7 +223,7 @@ fn yn(b: bool) -> &'static str {
 /// Run the soak against `endpoint` for `cfg.duration`.
 pub async fn run_soak(endpoint: SocketAddr, cfg: &SoakConfig) -> Result<SoakReport, HarnessError> {
     let harness = BrainEvalHarness::connect(endpoint).await?;
-    let salt = hex16(harness.agent_id());
+    let salt = hex16(harness.space_id());
 
     let start = Instant::now();
     let mut next_sample = start + cfg.sample_every;

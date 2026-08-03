@@ -44,16 +44,16 @@ pub struct RunConfig {
     /// single-fact retrieval, where the answer is one item and "is it in
     /// the retrieved list at all" is a clean signal.
     pub question_types: Option<Vec<String>>,
-    /// When set, write the per-conversation `agent_id` manifest to this
-    /// path during an ingesting run, so a later `read_only_agents` run can
+    /// When set, write the per-conversation `space_id` manifest to this
+    /// path during an ingesting run, so a later `read_only_spaces` run can
     /// re-query the populated store without re-ingesting.
-    /// `BRAIN_EVAL_PERSIST_AGENTS`.
-    pub persist_agents: Option<PathBuf>,
-    /// When set, SKIP ingest and reconnect to the agents in this manifest,
+    /// `BRAIN_EVAL_PERSIST_SPACES`.
+    pub persist_spaces: Option<PathBuf>,
+    /// When set, SKIP ingest and reconnect to the spaces in this manifest,
     /// running only retrieval + judging against the already-populated
     /// store — read-path iteration with no write cost.
-    /// `BRAIN_EVAL_READ_ONLY_AGENTS`.
-    pub read_only_agents: Option<PathBuf>,
+    /// `BRAIN_EVAL_READ_ONLY_SPACES`.
+    pub read_only_spaces: Option<PathBuf>,
     /// Tenant namespace minted data-plane keys bind to. `BRAIN_EVAL_NAMESPACE`,
     /// default `eval`.
     pub namespace: String,
@@ -71,7 +71,7 @@ pub struct RunConfig {
     pub only_conversation: Option<String>,
     /// When true, after each conversation's drain barrier completes,
     /// enumerate that conversation's memories via `MEMORY_LIST` on the same
-    /// authenticated agent, print a summary, and assert the listed count is
+    /// authenticated space, print a summary, and assert the listed count is
     /// > 0. `BRAIN_EVAL_VERIFY_MEMORY_LIST`.
     pub verify_memory_list: bool,
 }
@@ -87,8 +87,8 @@ impl RunConfig {
             output_dir: PathBuf::from("target/eval-reports"),
             reporters: vec![ReporterKind::Json, ReporterKind::Text],
             question_types: None,
-            persist_agents: None,
-            read_only_agents: None,
+            persist_spaces: None,
+            read_only_spaces: None,
             namespace: DEFAULT_NAMESPACE.to_string(),
             admin_secret: None,
             admin_port: DEFAULT_ADMIN_PORT,
@@ -98,7 +98,7 @@ impl RunConfig {
     }
 
     /// A [`KeyMinter`] for this run's endpoint, namespace, and admin plane.
-    /// Used to mint per-agent data-plane keys before connecting.
+    /// Used to mint per-space data-plane keys before connecting.
     #[must_use]
     pub fn key_minter(&self) -> KeyMinter {
         KeyMinter::new(
@@ -161,11 +161,11 @@ impl RunConfig {
             })
             .filter(|v| !v.is_empty());
 
-        let persist_agents = std::env::var("BRAIN_EVAL_PERSIST_AGENTS")
+        let persist_spaces = std::env::var("BRAIN_EVAL_PERSIST_SPACES")
             .ok()
             .filter(|s| !s.is_empty())
             .map(PathBuf::from);
-        let read_only_agents = std::env::var("BRAIN_EVAL_READ_ONLY_AGENTS")
+        let read_only_spaces = std::env::var("BRAIN_EVAL_READ_ONLY_SPACES")
             .ok()
             .filter(|s| !s.is_empty())
             .map(PathBuf::from);
@@ -200,8 +200,8 @@ impl RunConfig {
             output_dir: PathBuf::from(output_dir),
             reporters,
             question_types,
-            persist_agents,
-            read_only_agents,
+            persist_spaces,
+            read_only_spaces,
             namespace,
             admin_secret,
             admin_port,

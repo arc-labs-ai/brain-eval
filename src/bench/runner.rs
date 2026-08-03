@@ -1,7 +1,7 @@
 //! `EvalRunner` — drive a benchmark end-to-end.
 //!
 //! For each `EvalInstance`:
-//! 1. Spin up a fresh harness (= fresh `AgentId` = guaranteed isolation
+//! 1. Spin up a fresh harness (= fresh `SpaceId` = guaranteed isolation
 //!    from other questions per spec §12/02).
 //! 2. Ingest every session via [`crate::client::harness::BrainEvalHarness::ingest`].
 //! 3. Run a RECALL with the question as the cue.
@@ -20,7 +20,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use tracing::warn;
 
-use crate::bench::agent_manifest::AgentManifest;
+use crate::bench::space_manifest::SpaceManifest;
 use crate::bench::config::{ReporterKind, RunConfig};
 use crate::bench::core::benchmark::{Benchmark, EvalError};
 use crate::bench::core::instance::{EvalInstance, QuestionType};
@@ -233,17 +233,17 @@ impl EvalRunner {
             tracker.path.display()
         );
 
-        // Read-only mode: reconnect to the agents a prior `--persist-agents`
+        // Read-only mode: reconnect to the spaces a prior `--persist-spaces`
         // run recorded and SKIP ingest entirely, so the read path can be
         // re-measured against the already-populated store with no write cost.
-        let read_only = match &self.config.read_only_agents {
+        let read_only = match &self.config.read_only_spaces {
             Some(path) => {
-                let m = AgentManifest::load(path).map_err(|e| EvalError::ParseError {
+                let m = SpaceManifest::load(path).map_err(|e| EvalError::ParseError {
                     path: path.display().to_string(),
-                    reason: format!("read-only agent manifest: {e}"),
+                    reason: format!("read-only space manifest: {e}"),
                 })?;
                 println!(
-                    "eval: read-only mode — reusing {} agents from {} (no ingest)",
+                    "eval: read-only mode — reusing {} spaces from {} (no ingest)",
                     m.len(),
                     path.display()
                 );
@@ -251,16 +251,16 @@ impl EvalRunner {
             }
             None => None,
         };
-        // Persist mode: record each conversation's agent id so a later
+        // Persist mode: record each conversation's space id so a later
         // read-only run can reuse it. Only meaningful on an ingesting run.
         let mut persist = self
             .config
-            .persist_agents
+            .persist_spaces
             .as_ref()
-            .map(|_| AgentManifest::new(benchmark.id(), self.config.endpoint.to_string()));
+            .map(|_| SpaceManifest::new(benchmark.id(), self.config.endpoint.to_string()));
 
-        // One minter for the whole run; mint a data-plane key per agent and
-        // cache it so a reconnect of the same agent reuses its token rather
+        // One minter for the whole run; mint a data-plane key per space and
+        // cache it so a reconnect of the same space reuses its token rather
         // than minting a fresh one each time.
         let minter = self.config.key_minter();
         // Preflight: prove the admin plane can mint BEFORE iterating
@@ -304,19 +304,19 @@ impl EvalRunner {
 
         for (conv_key, idxs) in &groups {
             // Establish the harness and decide whether to ingest. Read-only
-            // reconnects to the recorded agent and skips ingest entirely;
-            // otherwise mint a fresh agent, ingest once, and (if persisting)
-            // record the agent for future read-only reuse.
+            // reconnects to the recorded space and skips ingest entirely;
+            // otherwise mint a fresh space, ingest once, and (if persisting)
+            // record the space for future read-only reuse.
             let (harness, cw): (BrainEvalHarness, ConvWrite) = if let Some(manifest) = &read_only {
-                let Some(agent) = manifest.agent_for(conv_key) else {
+                let Some(space) = manifest.space_for(conv_key) else {
                     warn!(
                         conversation = %conv_key,
-                        "read-only: no agent recorded for this conversation; recording its questions as failed",
+                        "read-only: no space recorded for this conversation; recording its questions as failed",
                     );
                     for &idx in idxs {
                         let r = failed_question_result(
                             &instances[idx],
-                            "read-only: no persisted agent for conversation".to_owned(),
+                            "read-only: no persisted space for conversation".to_owned(),
                             /* ingest_failed = */ true,
                         );
                         record_failed(
@@ -328,9 +328,9 @@ impl EvalRunner {
                     }
                     continue;
                 };
-                let reconnect = match mint_or_cached(&minter, &mut tokens, agent).await {
+                let reconnect = match mint_or_cached(&minter, &mut tokens, space).await {
                     Ok(token) => {
-                        BrainEvalHarness::connect_with_token(self.config.endpoint, agent, token)
+                        BrainEvalHarness::connect_with_token(self.config.endpoint, space, token)
                             .await
                     }
                     Err(e) => Err(e),
@@ -356,11 +356,11 @@ impl EvalRunner {
                     }
                 }
             } else {
-                // Fresh agent for this conversation: mint its key, connect.
-                let agent_id = brain_db_sdk::new_id();
-                let connect = match mint_or_cached(&minter, &mut tokens, agent_id).await {
+                // Fresh space for this conversation: mint its key, connect.
+                let space_id = brain_db_sdk::new_id();
+                let connect = match mint_or_cached(&minter, &mut tokens, space_id).await {
                     Ok(token) => {
-                        BrainEvalHarness::connect_with_token(self.config.endpoint, agent_id, token)
+                        BrainEvalHarness::connect_with_token(self.config.endpoint, space_id, token)
                             .await
                     }
                     Err(e) => Err(e),
@@ -391,9 +391,9 @@ impl EvalRunner {
                     }
                 };
 
-                // Record the agent so a later read-only run can reuse it.
+                // Record the space so a later read-only run can reuse it.
                 if let Some(p) = persist.as_mut() {
-                    p.record(conv_key, harness.agent_id());
+                    p.record(conv_key, harness.space_id());
                 }
 
                 // ---- ingest once ----
@@ -437,7 +437,7 @@ impl EvalRunner {
                 };
                 conversation_writes.push(ConversationWrite {
                     conversation_id: conv_key.clone(),
-                    agent_id: uuid::Uuid::from_bytes(harness.agent_id())
+                    space_id: uuid::Uuid::from_bytes(harness.space_id())
                         .hyphenated()
                         .to_string(),
                     write_latency_ms: cw.latency_ms,
@@ -451,7 +451,7 @@ impl EvalRunner {
             }
 
             // ---- MEMORY_LIST verification (opt-in) ----
-            // Enumerate the tenant timeline on the SAME authenticated agent.
+            // Enumerate the tenant timeline on the SAME authenticated space.
             // After an ingesting run the drain barrier has settled, so this
             // cross-checks against what ingest reported storing (`cw.stored`).
             // In a read-only run there is no ingest count (`cw.stored == 0`),
@@ -497,18 +497,18 @@ impl EvalRunner {
             }
         }
 
-        // Persist the conversation→agent manifest so a later
-        // `BRAIN_EVAL_READ_ONLY_AGENTS` run can re-query this populated
+        // Persist the conversation→space manifest so a later
+        // `BRAIN_EVAL_READ_ONLY_SPACES` run can re-query this populated
         // store without re-ingesting.
-        if let (Some(p), Some(path)) = (persist.as_ref(), self.config.persist_agents.as_ref()) {
+        if let (Some(p), Some(path)) = (persist.as_ref(), self.config.persist_spaces.as_ref()) {
             match p.save(path) {
                 Ok(()) => println!(
-                    "eval: wrote {} agents to {} (reuse with BRAIN_EVAL_READ_ONLY_AGENTS={})",
+                    "eval: wrote {} spaces to {} (reuse with BRAIN_EVAL_READ_ONLY_SPACES={})",
                     p.len(),
                     path.display(),
                     path.display()
                 ),
-                Err(e) => warn!(error = %e, "failed to write agent manifest"),
+                Err(e) => warn!(error = %e, "failed to write space manifest"),
             }
         }
 
@@ -866,6 +866,7 @@ fn full_trace_enabled() -> bool {
 /// default fusion, no filters — the same shape a plain RECALL takes.
 fn trace_query_request(text: &str, limit: u32) -> QueryRequest {
     QueryRequest {
+        session_filter: None,
         text: text.to_string(),
         entity_anchor: None,
         kind_filter: Vec::new(),
@@ -882,7 +883,7 @@ fn trace_query_request(text: &str, limit: u32) -> QueryRequest {
     }
 }
 
-/// Enumerate the calling agent's memories via MEMORY_LIST, paginating with
+/// Enumerate the calling space's memories via MEMORY_LIST, paginating with
 /// the opaque keyset cursor until exhausted, and print a verification
 /// summary. Best-effort: a failed page is logged and stops the walk, never
 /// aborts the run. `stored` is what ingest reported writing for this
@@ -1070,19 +1071,19 @@ impl IncrementalTracker {
     }
 }
 
-/// Get the cached data-plane token for `agent_id`, minting (and caching) a
-/// fresh one on first use. Caching keeps a reconnect of the same agent on the
+/// Get the cached data-plane token for `space_id`, minting (and caching) a
+/// fresh one on first use. Caching keeps a reconnect of the same space on the
 /// same key instead of minting a new one each time.
 async fn mint_or_cached(
     minter: &KeyMinter,
     tokens: &mut BTreeMap<[u8; 16], String>,
-    agent_id: [u8; 16],
+    space_id: [u8; 16],
 ) -> Result<String, HarnessError> {
-    if let Some(t) = tokens.get(&agent_id) {
+    if let Some(t) = tokens.get(&space_id) {
         return Ok(t.clone());
     }
-    let token = minter.mint(agent_id).await?;
-    tokens.insert(agent_id, token.clone());
+    let token = minter.mint(space_id).await?;
+    tokens.insert(space_id, token.clone());
     Ok(token)
 }
 

@@ -3,7 +3,7 @@
 //! Black-box behavioural checks that drive a real `brain-server` through
 //! the SDK and assert end-to-end contracts the substrate must hold:
 //!
-//! - [`multi_agent_isolation`] — one agent's memories are invisible to
+//! - [`multi_space_isolation`] — one space's memories are invisible to
 //!   another.
 //! - [`encode_recall_forget`] — a memory is recallable, then gone after
 //!   FORGET.
@@ -69,9 +69,9 @@ fn any_text_contains(hits: &[brain_db_sdk::wire::types::MemoryResult], needle: &
     hits.iter().any(|m| m.text.contains(needle))
 }
 
-/// One agent's memories must not surface in another agent's recall.
-pub async fn multi_agent_isolation(endpoint: SocketAddr) -> ScenarioOutcome {
-    const NAME: &str = "multi_agent_isolation";
+/// One space's memories must not surface in another space's recall.
+pub async fn multi_space_isolation(endpoint: SocketAddr) -> ScenarioOutcome {
+    const NAME: &str = "multi_space_isolation";
     match run_isolation(endpoint).await {
         Ok(outcome) => outcome,
         Err(e) => ScenarioOutcome::fail(NAME, format!("sdk error: {e}")),
@@ -79,39 +79,39 @@ pub async fn multi_agent_isolation(endpoint: SocketAddr) -> ScenarioOutcome {
 }
 
 async fn run_isolation(endpoint: SocketAddr) -> Result<ScenarioOutcome, HarnessError> {
-    const NAME: &str = "multi_agent_isolation";
-    let agent_a = BrainEvalHarness::connect(endpoint).await?;
-    let agent_b = BrainEvalHarness::connect(endpoint).await?;
+    const NAME: &str = "multi_space_isolation";
+    let space_a = BrainEvalHarness::connect(endpoint).await?;
+    let space_b = BrainEvalHarness::connect(endpoint).await?;
 
-    // A unique marker keyed by agent A's id so repeated runs don't collide.
-    let marker = format!("isolation-marker-{}", hex16(agent_a.agent_id()));
+    // A unique marker keyed by space A's id so repeated runs don't collide.
+    let marker = format!("isolation-marker-{}", hex16(space_a.space_id()));
     let secret = format!("{marker}: the vault code is alpha-tango-niner");
-    agent_a
+    space_a
         .client()
         .encode(&EncodeBuilder::new(secret.as_str()).build())
         .await?;
 
-    let b_hits = agent_b.recall(&marker, 10).await?;
-    let a_hits = agent_a.recall(&marker, 10).await?;
+    let b_hits = space_b.recall(&marker, 10).await?;
+    let a_hits = space_a.recall(&marker, 10).await?;
 
-    agent_a.close().await?;
-    agent_b.close().await?;
+    space_a.close().await?;
+    space_b.close().await?;
 
     if any_text_contains(&b_hits.memories, &marker) {
         return Ok(ScenarioOutcome::fail(
             NAME,
-            "agent B recalled agent A's memory — isolation breach",
+            "space B recalled space A's memory — isolation breach",
         ));
     }
     if !any_text_contains(&a_hits.memories, &marker) {
         return Ok(ScenarioOutcome::fail(
             NAME,
-            "agent A could not recall its own just-written memory",
+            "space A could not recall its own just-written memory",
         ));
     }
     Ok(ScenarioOutcome::pass(
         NAME,
-        "A sees its memory; B (different agent) does not",
+        "A sees its memory; B (different space) does not",
     ))
 }
 
@@ -127,7 +127,7 @@ pub async fn encode_recall_forget(endpoint: SocketAddr) -> ScenarioOutcome {
 async fn run_forget(endpoint: SocketAddr) -> Result<ScenarioOutcome, HarnessError> {
     const NAME: &str = "encode_recall_forget";
     let h = BrainEvalHarness::connect(endpoint).await?;
-    let marker = format!("forget-marker-{}", hex16(h.agent_id()));
+    let marker = format!("forget-marker-{}", hex16(h.space_id()));
     let text = format!("{marker}: the migration ran at midnight");
 
     let enc = h
@@ -176,7 +176,7 @@ pub async fn txn_read_your_writes(endpoint: SocketAddr) -> ScenarioOutcome {
 async fn run_txn(endpoint: SocketAddr) -> Result<ScenarioOutcome, HarnessError> {
     const NAME: &str = "txn_read_your_writes";
     let h = BrainEvalHarness::connect(endpoint).await?;
-    let marker = format!("txn-marker-{}", hex16(h.agent_id()));
+    let marker = format!("txn-marker-{}", hex16(h.space_id()));
     let text = format!("{marker}: provisional note inside a transaction");
 
     let txn_id = new_id();
@@ -226,7 +226,7 @@ async fn run_txn(endpoint: SocketAddr) -> Result<ScenarioOutcome, HarnessError> 
 /// Run the core black-box scenarios against `endpoint`.
 pub async fn run_core_scenarios(endpoint: SocketAddr) -> Vec<ScenarioOutcome> {
     vec![
-        multi_agent_isolation(endpoint).await,
+        multi_space_isolation(endpoint).await,
         encode_recall_forget(endpoint).await,
         txn_read_your_writes(endpoint).await,
     ]

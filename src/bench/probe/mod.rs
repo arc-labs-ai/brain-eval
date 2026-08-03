@@ -352,6 +352,7 @@ async fn probe_read(client: &BrainClient) -> Result<bool, ProbeError> {
 /// set explicitly: Auto routing, default fusion, no filters.
 fn query_request(text: &str) -> QueryRequest {
     QueryRequest {
+        session_filter: None,
         text: text.to_string(),
         entity_anchor: None,
         kind_filter: Vec::new(),

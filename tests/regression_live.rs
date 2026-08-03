@@ -77,7 +77,7 @@ async fn recall_quality_no_regression() {
         let client = BrainClient::connect_with(server.endpoint(), config)
             .await
             .expect("connect");
-        let salt = hex16(client.agent_id());
+        let salt = hex16(client.space_id());
         let report = run_recall_quality(
             &client,
             RECALL_N,

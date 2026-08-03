@@ -51,14 +51,14 @@ async fn run_restart_recovery(
         .await
         .map_err(|e| format!("first boot: {e}"))?;
 
-    // One agent id, reused across the restart so the second connection
+    // One space id, reused across the restart so the second connection
     // queries the same shard slice the first wrote to.
-    let agent_id = brain_db_sdk::new_id();
-    let marker = format!("recovery-marker-{}", super::hex16(agent_id));
+    let space_id = brain_db_sdk::new_id();
+    let marker = format!("recovery-marker-{}", super::hex16(space_id));
 
     {
         let h =
-            BrainEvalHarness::connect_minted(&server1.key_minter(), server1.endpoint(), agent_id)
+            BrainEvalHarness::connect_minted(&server1.key_minter(), server1.endpoint(), space_id)
                 .await
                 .map_err(|e| format!("connect #1: {e}"))?;
         for i in 0..N {
@@ -84,7 +84,7 @@ async fn run_restart_recovery(
 
     let recovered = {
         let h =
-            BrainEvalHarness::connect_minted(&server2.key_minter(), server2.endpoint(), agent_id)
+            BrainEvalHarness::connect_minted(&server2.key_minter(), server2.endpoint(), space_id)
                 .await
                 .map_err(|e| format!("connect #2: {e}"))?;
         // Pull more than N so we can count distinct recovered facts.
