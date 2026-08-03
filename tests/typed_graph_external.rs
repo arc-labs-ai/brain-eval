@@ -41,7 +41,10 @@ async fn typed_graph_scenarios_against_external_server() {
 
     let outcomes = run_typed_graph_scenarios(addr).await;
 
-    assert!(!outcomes.is_empty(), "expected typed-graph scenarios to run");
+    assert!(
+        !outcomes.is_empty(),
+        "expected typed-graph scenarios to run"
+    );
     let mut failed = Vec::new();
     for o in &outcomes {
         println!(
@@ -54,5 +57,8 @@ async fn typed_graph_scenarios_against_external_server() {
             failed.push(o.name);
         }
     }
-    assert!(failed.is_empty(), "typed-graph scenarios failed: {failed:?}");
+    assert!(
+        failed.is_empty(),
+        "typed-graph scenarios failed: {failed:?}"
+    );
 }

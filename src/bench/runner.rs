@@ -20,7 +20,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use tracing::warn;
 
-use crate::bench::space_manifest::SpaceManifest;
 use crate::bench::config::{ReporterKind, RunConfig};
 use crate::bench::core::benchmark::{Benchmark, EvalError};
 use crate::bench::core::instance::{EvalInstance, QuestionType};
@@ -36,6 +35,7 @@ use crate::bench::report::run_report::{
 };
 use crate::bench::report::shape::{BenchmarkMeta, BenchmarkReport};
 use crate::bench::score::metrics::compute_full_metrics;
+use crate::bench::space_manifest::SpaceManifest;
 use crate::bench::synthesize::synthesize_answer;
 use crate::client::auth::KeyMinter;
 use crate::client::harness::{BrainEvalHarness, HarnessError, RecallOutcome};

@@ -12,7 +12,6 @@
 //! | [`report`]    | What does the output look like?                  |
 //! | `config`, `space_manifest`, `synthesize`, `runner` | How does a run happen? (config, per-space probing, answer synthesis, orchestration) |
 
-pub mod space_manifest;
 pub mod config;
 pub mod core;
 pub mod datasets;
@@ -22,6 +21,7 @@ pub mod probe;
 pub mod report;
 pub mod runner;
 pub mod score;
+pub mod space_manifest;
 pub mod synthesize;
 
 pub use config::{ReporterKind, RunConfig};
