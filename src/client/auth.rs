@@ -193,15 +193,54 @@ impl KeyMinter {
     /// [`MintError::Transport`] / [`MintError::Status`] /
     /// [`MintError::BadResponse`] for admin-plane failures.
     pub async fn mint(&self, space_id: [u8; 16]) -> Result<String, MintError> {
+        self.mint_with(serde_json::json!({
+            "space_id_hex": hex_lower(&space_id),
+            "namespace": self.namespace,
+            "permissions": ["FULL"],
+        }))
+        .await
+    }
+
+    /// Mint a delegation-capable data-plane key: bound to
+    /// `(namespace, space_id)` with `permissions` plus a `may_act` allowlist
+    /// naming the namespaces it may run ops *for* under the `ACT_AS` grant.
+    /// This is the trusted-front-door credential the shared-pool gateway
+    /// model uses — one authenticated principal that attaches a per-request
+    /// (or per-transaction) `act_as` selector.
+    ///
+    /// `permissions` must include `ACT_AS` for `may_act` to be meaningful;
+    /// the server rejects a `may_act` allowlist without the grant, and an
+    /// `ACT_AS` grant with an empty allowlist. Pass a single `"*"` entry for
+    /// the wildcard grant (server-side reserved for the service principal).
+    ///
+    /// # Errors
+    ///
+    /// [`MintError::NoSecret`] when no admin secret is configured;
+    /// [`MintError::Transport`] / [`MintError::Status`] /
+    /// [`MintError::BadResponse`] for admin-plane failures.
+    pub async fn mint_with_may_act(
+        &self,
+        space_id: [u8; 16],
+        permissions: &[&str],
+        may_act: &[String],
+    ) -> Result<String, MintError> {
+        self.mint_with(serde_json::json!({
+            "space_id_hex": hex_lower(&space_id),
+            "namespace": self.namespace,
+            "permissions": permissions,
+            "may_act": may_act,
+        }))
+        .await
+    }
+
+    /// POST a fully-formed mint body to the admin plane and return the raw
+    /// secret token. Shared by [`mint`](Self::mint) and
+    /// [`mint_with_may_act`](Self::mint_with_may_act).
+    async fn mint_with(&self, body: serde_json::Value) -> Result<String, MintError> {
         if self.admin_secret.is_empty() {
             return Err(MintError::NoSecret);
         }
         let url = format!("{}/v1/api-keys", self.admin_base);
-        let body = serde_json::json!({
-            "space_id_hex": hex_lower(&space_id),
-            "namespace": self.namespace,
-            "permissions": ["FULL"],
-        });
         let resp = self
             .http
             .post(&url)

@@ -9,6 +9,9 @@
 //!   FORGET.
 //! - [`txn_read_your_writes`] — a write buffered in a txn is visible to
 //!   reads inside that txn, and to everyone after commit.
+//! - [`delegated_txn`] — a txn begun with `act_as` commits its buffered
+//!   writes under the delegated identity (the shared-pool gateway model at
+//!   the transaction level).
 //!
 //! Each returns a [`ScenarioOutcome`]; [`run_core_scenarios`] runs the
 //! set. Heavier durability scenarios (restart-recovery, backfill, chaos)
@@ -16,9 +19,10 @@
 
 use std::net::SocketAddr;
 
-use brain_db_sdk::wire::types::{TxnBeginRequest, TxnCommitRequest};
+use brain_db_sdk::wire::types::{ActAs, TxnBeginRequest, TxnCommitRequest};
 use brain_db_sdk::{new_id, EncodeBuilder, ForgetBuilder, RecallBuilder};
 
+use crate::client::auth::KeyMinter;
 use crate::client::harness::{BrainEvalHarness, HarnessError};
 
 pub mod audit;
@@ -196,6 +200,7 @@ async fn run_txn(endpoint: SocketAddr) -> Result<ScenarioOutcome, HarnessError> 
         .txn_begin(&TxnBeginRequest {
             txn_id,
             timeout_seconds: 30,
+            act_as: None,
         })
         .await?;
 
@@ -235,12 +240,108 @@ async fn run_txn(endpoint: SocketAddr) -> Result<ScenarioOutcome, HarnessError> 
     ))
 }
 
+/// A transaction begun with `act_as` commits its buffered writes under the
+/// delegated identity — the shared-pool gateway model at the transaction
+/// level. One service-principal connection opens a txn on behalf of a tenant,
+/// buffers a write as its own identity, and commits (TXN_COMMIT carries no
+/// `act_as`); the committed memory must be reachable by the tenant's effective
+/// identity and invisible to the connection's own identity.
+pub async fn delegated_txn(endpoint: SocketAddr) -> ScenarioOutcome {
+    const NAME: &str = "delegated_txn";
+    match run_delegated_txn(endpoint).await {
+        Ok(outcome) => outcome,
+        Err(e) => ScenarioOutcome::fail(NAME, format!("sdk error: {e}")),
+    }
+}
+
+async fn run_delegated_txn(endpoint: SocketAddr) -> Result<ScenarioOutcome, HarnessError> {
+    const NAME: &str = "delegated_txn";
+
+    // A single trusted service principal: ACT_AS grant + STANDARD_SPACE, with a
+    // may_act allowlist naming the delegated tenant namespace. This is the only
+    // credential the "gateway" holds. Each run derives a fresh delegated
+    // namespace/space so repeats never collide.
+    let svc_space = new_id();
+    let salt = hex16(svc_space);
+    let delegated_ns = format!("tenant_txn_{salt}");
+    let delegated_space = format!("space-txn-{salt}");
+    let marker = format!("delegated-txn-{salt}");
+    let text = format!("{marker}: the pager code is 8080");
+
+    let minter = KeyMinter::from_external_env(endpoint);
+    let token = minter
+        .mint_with_may_act(
+            svc_space,
+            &["ACT_AS", "STANDARD_SPACE"],
+            &[delegated_ns.clone()],
+        )
+        .await?;
+    let h = BrainEvalHarness::connect_with_token(endpoint, svc_space, token).await?;
+    let delegated = ActAs {
+        namespace: delegated_ns,
+        space_id: delegated_space,
+    };
+
+    // BEGIN as the delegated identity; delegation is fixed for the whole txn.
+    let txn_id = new_id();
+    h.client()
+        .txn_begin(&TxnBeginRequest {
+            txn_id,
+            timeout_seconds: 60,
+            act_as: Some(delegated.clone()),
+        })
+        .await?;
+
+    // Buffer a write (the encode runs as the connection's own identity — the
+    // delegation fixed at begin steers where the commit lands), then COMMIT
+    // (which carries no act_as of its own).
+    let mut enc = EncodeBuilder::new(text.as_str()).build();
+    enc.txn_id = Some(txn_id);
+    let mem = h.client().encode(&enc).await?.memory_id;
+    h.client().txn_commit(&TxnCommitRequest { txn_id }).await?;
+
+    // The delegated identity must see the committed memory.
+    let mut delegated_recall = RecallBuilder::new(marker.as_str())
+        .max_results(50)
+        .include_text(true)
+        .build();
+    delegated_recall.act_as = Some(delegated);
+    let delegated_hits = h.client().recall(&delegated_recall).await?.memories;
+
+    // The connection's OWN identity (act_as = None) must NOT — proving the
+    // write landed in the delegated space, not the committing connection's.
+    let own_hits = h.recall(&marker, 50).await?.memories;
+    h.close().await?;
+
+    let delegated_sees = delegated_hits.iter().any(|m| m.memory_id == mem)
+        || any_text_contains(&delegated_hits, &marker);
+    if !delegated_sees {
+        return Ok(ScenarioOutcome::fail(
+            NAME,
+            "delegated identity did not see the txn-committed memory",
+        ));
+    }
+    let own_sees =
+        own_hits.iter().any(|m| m.memory_id == mem) || any_text_contains(&own_hits, &marker);
+    if own_sees {
+        return Ok(ScenarioOutcome::fail(
+            NAME,
+            "the committing connection's own identity saw the delegated txn write",
+        ));
+    }
+    Ok(ScenarioOutcome::pass(
+        NAME,
+        "delegated txn write reachable by the tenant, invisible to the connection identity",
+    ))
+}
+
 /// Run the core black-box scenarios against `endpoint`.
 pub async fn run_core_scenarios(endpoint: SocketAddr) -> Vec<ScenarioOutcome> {
     vec![
         multi_space_isolation(endpoint).await,
         encode_recall_forget(endpoint).await,
         txn_read_your_writes(endpoint).await,
+        delegated_txn(endpoint).await,
     ]
 }
 
