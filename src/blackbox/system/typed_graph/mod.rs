@@ -28,6 +28,7 @@ pub mod entity_merge;
 pub mod extraction;
 pub mod relation;
 pub mod schema;
+pub mod schema_drop;
 pub mod statement;
 
 pub use entity::entity_lifecycle;
@@ -35,6 +36,7 @@ pub use entity_merge::entity_merge_unmerge;
 pub use extraction::extraction_pipeline;
 pub use relation::relation_lifecycle;
 pub use schema::schema_lifecycle;
+pub use schema_drop::schema_drop;
 pub use statement::statement_lifecycle;
 
 /// Built-in `Person` entity type id, seeded by the `brain:` system schema
@@ -47,6 +49,7 @@ pub(crate) const PERSON_TYPE_ID: u32 = 1;
 pub async fn run_typed_graph_scenarios(endpoint: SocketAddr) -> Vec<ScenarioOutcome> {
     vec![
         schema_lifecycle(endpoint).await,
+        schema_drop(endpoint).await,
         entity_lifecycle(endpoint).await,
         entity_merge_unmerge(endpoint).await,
         statement_lifecycle(endpoint).await,
