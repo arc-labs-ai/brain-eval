@@ -156,6 +156,30 @@ impl AdminClient {
         Self::finish(url, resp).await
     }
 
+    /// `DELETE {base}{path_and_query}` with the admin bearer token and no
+    /// body (the backfill-cancel route takes the backfill id in the path).
+    ///
+    /// # Errors
+    ///
+    /// As [`get`](Self::get).
+    pub async fn delete(&self, path_and_query: &str) -> Result<AdminResponse, AdminError> {
+        if self.secret.is_empty() {
+            return Err(AdminError::NoSecret);
+        }
+        let url = format!("{}{path_and_query}", self.base);
+        let resp = self
+            .http
+            .delete(&url)
+            .bearer_auth(self.secret.expose_secret())
+            .send()
+            .await
+            .map_err(|source| AdminError::Transport {
+                url: url.clone(),
+                source,
+            })?;
+        Self::finish(url, resp).await
+    }
+
     async fn finish(url: String, resp: reqwest::Response) -> Result<AdminResponse, AdminError> {
         let status = resp.status().as_u16();
         let body = resp
@@ -187,6 +211,10 @@ mod tests {
         ));
         assert!(matches!(
             c.post_empty("/v1/rebuild-ann?shard=0").await,
+            Err(AdminError::NoSecret)
+        ));
+        assert!(matches!(
+            c.delete("/v1/backfill/deadbeef").await,
             Err(AdminError::NoSecret)
         ));
     }

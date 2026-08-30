@@ -24,6 +24,9 @@ use crate::client::harness::{BrainEvalHarness, HarnessError};
 pub mod audit;
 pub use audit::audit_derivation_logged;
 
+pub mod backfill;
+pub use backfill::resumable_backfill;
+
 pub mod chaos;
 pub use chaos::kill_during_write;
 
@@ -250,6 +253,7 @@ pub async fn run_admin_scenarios(endpoint: SocketAddr) -> Vec<ScenarioOutcome> {
     vec![
         audit_derivation_logged(endpoint).await,
         index_rebuild(endpoint).await,
+        resumable_backfill(endpoint).await,
         metrics_families_present(endpoint).await,
     ]
 }

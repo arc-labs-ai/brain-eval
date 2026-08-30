@@ -89,31 +89,26 @@ async fn run(endpoint: SocketAddr) -> Result<ScenarioOutcome, RebuildScenarioErr
     // Rebuild the memory HNSW via the back-compat alias across every shard,
     // discovering the shard count as we go (a 404 = shard out of range).
     let mut shard_count = 0usize;
-    loop {
-        match rebuild_shard(&admin, "/v1/rebuild-ann", shard_count).await? {
-            Some(resp) => {
-                if resp.status != 201 {
-                    h.close().await?;
-                    return Ok(ScenarioOutcome::fail(
-                        NAME,
-                        format!(
-                            "POST /v1/rebuild-ann?shard={shard_count} returned {} — {}",
-                            resp.status,
-                            snippet(&resp.body)
-                        ),
-                    ));
-                }
-                if let Err(e) = check_report(&resp.body, None) {
-                    h.close().await?;
-                    return Ok(ScenarioOutcome::fail(
-                        NAME,
-                        format!("rebuild-ann shard {shard_count} report unsane: {e}"),
-                    ));
-                }
-                shard_count += 1;
-            }
-            None => break,
+    while let Some(resp) = rebuild_shard(&admin, "/v1/rebuild-ann", shard_count).await? {
+        if resp.status != 201 {
+            h.close().await?;
+            return Ok(ScenarioOutcome::fail(
+                NAME,
+                format!(
+                    "POST /v1/rebuild-ann?shard={shard_count} returned {} — {}",
+                    resp.status,
+                    snippet(&resp.body)
+                ),
+            ));
         }
+        if let Err(e) = check_report(&resp.body, None) {
+            h.close().await?;
+            return Ok(ScenarioOutcome::fail(
+                NAME,
+                format!("rebuild-ann shard {shard_count} report unsane: {e}"),
+            ));
+        }
+        shard_count += 1;
     }
     if shard_count == 0 {
         h.close().await?;
