@@ -16,6 +16,24 @@ use std::net::SocketAddr;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
+/// Environment variable overriding the Prometheus `/metrics` listener port
+/// for an external server. Defaults to [`DEFAULT_METRICS_PORT`].
+pub const ENV_METRICS_PORT: &str = "BRAIN_EVAL_METRICS_PORT";
+/// Default `/metrics` listener port (matches the server's `metrics_addr`
+/// port in the standard three-port layout: data / metrics / admin).
+pub const DEFAULT_METRICS_PORT: u16 = 9091;
+
+/// Resolve the `/metrics` address for an external server: the data-plane IP
+/// plus [`ENV_METRICS_PORT`] (default [`DEFAULT_METRICS_PORT`]).
+#[must_use]
+pub fn metrics_addr_from_env(data_plane: SocketAddr) -> SocketAddr {
+    let port = std::env::var(ENV_METRICS_PORT)
+        .ok()
+        .and_then(|p| p.parse::<u16>().ok())
+        .unwrap_or(DEFAULT_METRICS_PORT);
+    SocketAddr::new(data_plane.ip(), port)
+}
+
 /// A parsed `/metrics` scrape — one [`Sample`] per exposition line.
 #[derive(Debug, Clone, Default)]
 pub struct PrometheusMetrics {
@@ -124,6 +142,29 @@ impl PrometheusMetrics {
             .find(|s| s.name == family)
             .map(|s| s.value)
     }
+
+    /// Whether any sampled family name begins with `prefix` (e.g.
+    /// `brain_worker_`). Used by the metrics-completeness gate to assert a
+    /// whole metric family emits (`worker_*` / `extractor_*` / …).
+    #[must_use]
+    pub fn has_prefix(&self, prefix: &str) -> bool {
+        self.samples.iter().any(|s| s.name.starts_with(prefix))
+    }
+
+    /// The distinct family names beginning with `prefix`, sorted — for a
+    /// human-readable report of what a prefix covered.
+    #[must_use]
+    pub fn families_with_prefix(&self, prefix: &str) -> Vec<String> {
+        let mut names: Vec<String> = self
+            .samples
+            .iter()
+            .filter(|s| s.name.starts_with(prefix))
+            .map(|s| s.name.clone())
+            .collect();
+        names.sort();
+        names.dedup();
+        names
+    }
 }
 
 #[cfg(test)]
@@ -164,5 +205,24 @@ brain_arena_slots_used{shard=\"0\"} 25
     fn ignores_comments_and_headers() {
         let m = PrometheusMetrics::parse("HTTP/1.1 200 OK\r\n# a comment\nfoo 1\n");
         assert_eq!(m.get("foo"), Some(1.0));
+    }
+
+    #[test]
+    fn has_prefix_matches_family_prefix() {
+        let m = PrometheusMetrics::parse(SAMPLE);
+        assert!(m.has_prefix("brain_wal_"));
+        assert!(m.has_prefix("brain_arena_"));
+        assert!(!m.has_prefix("brain_worker_"));
+        let fams = m.families_with_prefix("brain_");
+        assert!(fams.contains(&"brain_wal_size_bytes".to_string()));
+        assert!(fams.contains(&"brain_arena_slots_used".to_string()));
+    }
+
+    #[test]
+    fn metrics_addr_uses_env_port_default() {
+        // No env set: default metrics port applies.
+        let a = metrics_addr_from_env("127.0.0.1:9090".parse().unwrap());
+        assert_eq!(a.port(), DEFAULT_METRICS_PORT);
+        assert_eq!(a.ip().to_string(), "127.0.0.1");
     }
 }

@@ -22,8 +22,8 @@ use crate::blackbox::scale::{
     ScaleConfig, Targets,
 };
 use crate::blackbox::system::{
-    kill_during_write, restart_recovery, run_core_scenarios, run_invariant_scenarios,
-    run_typed_graph_scenarios, storage_footprint,
+    kill_during_write, restart_recovery, run_admin_scenarios, run_core_scenarios,
+    run_invariant_scenarios, run_typed_graph_scenarios, storage_footprint,
 };
 use crate::client::auth::KeyMinter;
 use crate::client::harness::BrainEvalHarness;
@@ -347,6 +347,17 @@ pub async fn run_acceptance(cfg: AcceptanceConfig) -> AcceptanceReport {
 
     // --- core-invariant "E5" suite (correctness gates) --------------
     for o in run_invariant_scenarios(cfg.endpoint).await {
+        gates.push(Gate {
+            name: o.name.to_string(),
+            perf: false,
+            passed: o.passed,
+            detail: o.detail,
+        });
+    }
+
+    // --- operator-admin "E7" suite: audit / rebuild / metrics
+    //     (correctness gates; drive the admin plane + /metrics) --------
+    for o in run_admin_scenarios(cfg.endpoint).await {
         gates.push(Gate {
             name: o.name.to_string(),
             perf: false,

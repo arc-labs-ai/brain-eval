@@ -21,6 +21,9 @@ use brain_db_sdk::{new_id, EncodeBuilder, ForgetBuilder, RecallBuilder};
 
 use crate::client::harness::{BrainEvalHarness, HarnessError};
 
+pub mod audit;
+pub use audit::audit_derivation_logged;
+
 pub mod chaos;
 pub use chaos::kill_during_write;
 
@@ -29,6 +32,12 @@ pub use durability::restart_recovery;
 
 pub mod invariants;
 pub use invariants::run_invariant_scenarios;
+
+pub mod metrics_families;
+pub use metrics_families::metrics_families_present;
+
+pub mod rebuild;
+pub use rebuild::index_rebuild;
 
 pub mod storage;
 pub use storage::storage_footprint;
@@ -229,6 +238,19 @@ pub async fn run_core_scenarios(endpoint: SocketAddr) -> Vec<ScenarioOutcome> {
         multi_space_isolation(endpoint).await,
         encode_recall_forget(endpoint).await,
         txn_read_your_writes(endpoint).await,
+    ]
+}
+
+/// Run the operator-admin acceptance scenarios ("E7") — the audit log,
+/// derived-index rebuild, and metrics-family completeness. These drive the
+/// admin HTTP plane (audit / rebuild) and the `/metrics` endpoint in addition
+/// to the wire path, so they read the admin secret + ports from the
+/// environment (`BRAIN_EVAL_ADMIN_*`, `BRAIN_EVAL_METRICS_PORT`).
+pub async fn run_admin_scenarios(endpoint: SocketAddr) -> Vec<ScenarioOutcome> {
+    vec![
+        audit_derivation_logged(endpoint).await,
+        index_rebuild(endpoint).await,
+        metrics_families_present(endpoint).await,
     ]
 }
 

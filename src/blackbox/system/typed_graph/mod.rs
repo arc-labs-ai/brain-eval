@@ -24,12 +24,14 @@ use std::net::SocketAddr;
 use super::ScenarioOutcome;
 
 pub mod entity;
+pub mod entity_merge;
 pub mod extraction;
 pub mod relation;
 pub mod schema;
 pub mod statement;
 
 pub use entity::entity_lifecycle;
+pub use entity_merge::entity_merge_unmerge;
 pub use extraction::extraction_pipeline;
 pub use relation::relation_lifecycle;
 pub use schema::schema_lifecycle;
@@ -46,6 +48,7 @@ pub async fn run_typed_graph_scenarios(endpoint: SocketAddr) -> Vec<ScenarioOutc
     vec![
         schema_lifecycle(endpoint).await,
         entity_lifecycle(endpoint).await,
+        entity_merge_unmerge(endpoint).await,
         statement_lifecycle(endpoint).await,
         relation_lifecycle(endpoint).await,
         extraction_pipeline(endpoint).await,
