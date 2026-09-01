@@ -131,6 +131,9 @@ pub enum ServerError {
     /// The container never reached the `healthy` state in time.
     #[error("server did not become healthy within {0:?}")]
     HealthTimeout(Duration),
+    /// `BRAIN_EVAL_ENDPOINT` was set but is not a valid `host:port`.
+    #[error("BRAIN_EVAL_ENDPOINT is not a valid host:port: {0}")]
+    BadEndpoint(String),
     /// Failed to write the temporary env-file used to forward a secret
     /// into the container without putting it in the process's argv.
     #[error("failed writing secret env file: {0}")]
@@ -210,6 +213,31 @@ impl ServerHandle {
             ),
             namespace: minter.namespace().to_string(),
             keep: false,
+        }
+    }
+
+    /// Resolve a server the way the live suites want it: if
+    /// `BRAIN_EVAL_ENDPOINT` is set (to a valid `host:port`), attach to that
+    /// already-running server via [`external`](Self::external) — the admin
+    /// plane it mints against comes from `BRAIN_EVAL_ADMIN_SECRET` /
+    /// `BRAIN_EVAL_ADMIN_PORT`, and [`stop`](Self::stop) is a no-op so the
+    /// operator's server is left untouched. Otherwise boot a throwaway
+    /// container with [`start_docker`](Self::start_docker).
+    ///
+    /// This lets one live suite target either a CI-booted image or a server
+    /// the operator already has up (`cargo run --bin brain-server`, the
+    /// devcontainer, a deployment) without duplicating the branch in every
+    /// test. `opts` is used only on the docker path.
+    pub async fn from_env_or_docker(opts: DockerServerOpts) -> Result<Self, ServerError> {
+        match std::env::var("BRAIN_EVAL_ENDPOINT") {
+            Ok(raw) if !raw.trim().is_empty() => {
+                let addr = raw
+                    .trim()
+                    .parse::<SocketAddr>()
+                    .map_err(|_| ServerError::BadEndpoint(raw))?;
+                Ok(Self::external(addr))
+            }
+            _ => Self::start_docker(opts).await,
         }
     }
 

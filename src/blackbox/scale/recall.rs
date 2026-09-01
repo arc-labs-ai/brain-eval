@@ -87,13 +87,19 @@ pub async fn run_recall_quality(
     salt: &str,
     targets: &RecallTargets,
 ) -> Result<RecallQualityReport, HarnessError> {
-    // Encode N memories, each carrying its own nonce.
+    // Encode N memories, each carrying its own nonce. ENCODE acks on the
+    // durable WAL sync (`WaitMode::Ack`) *before* async derivation runs, so a
+    // plain encode-then-recall races the index: the just-written vector may not
+    // be in the HNSW / lexical index when we query it, and the probe reads 0
+    // recall for a memory that is in fact stored. `wait_derived` blocks each
+    // encode until derivation (embed + index insert) completes, so the
+    // subsequent recall measures retrieval quality, not indexing lag.
     for i in 0..n {
         let text = format!(
             "Reference note {i}: the marker is {}. Surrounded by ordinary prose so retrieval has to discriminate.",
             nonce(salt, i)
         );
-        let req = EncodeBuilder::new(text.as_str()).build();
+        let req = EncodeBuilder::new(text.as_str()).wait_derived().build();
         client.encode(&req).await?;
     }
 

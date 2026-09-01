@@ -6,8 +6,10 @@
 //! removed with `SCHEMA_DROP`. With no live rows on the target, the drop needs
 //! no `force`, reports `dropped = true` / `live_rows = 0`, and bumps the
 //! namespace to a version above the uploaded one. A second drop of the now-gone
-//! predicate is a no-op — `dropped = false`, `schema_version = 0` — mirroring
-//! the valid/invalid dual of the lifecycle scenario.
+//! predicate is a no-op — `dropped = false`, and it reports the current active
+//! `schema_version` unchanged (the version only advances when a drop actually
+//! narrows the document) — mirroring the valid/invalid dual of the lifecycle
+//! scenario.
 
 use std::net::SocketAddr;
 
@@ -42,10 +44,17 @@ async fn run(endpoint: SocketAddr) -> Result<ScenarioOutcome, HarnessError> {
     let ns = format!("e2_{}", &hex16(space_id)[..12]);
     let h = BrainEvalHarness::connect_in_namespace(endpoint, space_id, ns.clone()).await?;
 
-    // A well-formed schema with one predicate (the drop target) and one
-    // relation_type. `define` is the real DSL keyword.
+    // A well-formed schema: one entity_type, one predicate (the drop target),
+    // and one relation_type whose `from`/`to` resolve to that entity_type.
+    // `define` is the real DSL keyword. The entity_type must be declared — a
+    // relation_type referencing an undeclared type is rejected `UnresolvedTypeRef`.
     let doc = format!(
         "namespace {ns}\n\
+         define entity_type Widget {{\n\
+         \x20\x20\x20\x20attributes {{\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20serial: text optional\n\
+         \x20\x20\x20\x20}}\n\
+         }}\n\
          define predicate {PREDICATE_NAME} {{\n\
          \x20\x20\x20\x20kind: Fact\n\
          \x20\x20\x20\x20object: Value<text>\n\
@@ -174,11 +183,16 @@ async fn run(endpoint: SocketAddr) -> Result<ScenarioOutcome, HarnessError> {
             "re-drop of an already-absent predicate reported dropped=true (should be a no-op)",
         ));
     }
-    if redrop.schema_version != 0 {
+    // A no-op drop reports the current active version unchanged (it advances
+    // only when a drop actually narrows the document). With a schema still
+    // active, that is `dropped_version` — not 0 (0 is reserved for the case
+    // where no schema is declared at all).
+    if redrop.schema_version != dropped_version {
         return Ok(ScenarioOutcome::fail(
             NAME,
             format!(
-                "no-op re-drop returned schema_version {} (should be 0 when nothing dropped)",
+                "no-op re-drop returned schema_version {} (should report the unchanged \
+                 active version {dropped_version})",
                 redrop.schema_version
             ),
         ));
