@@ -78,8 +78,27 @@ pub struct RunConfig {
 
 impl RunConfig {
     /// Sensible defaults for the given endpoint.
+    ///
+    /// The admin plane (`admin_secret` / `admin_port`) is read from the
+    /// environment (`BRAIN_EVAL_ADMIN_SECRET`, `BRAIN_EVAL_ADMIN_PORT`)
+    /// exactly as [`RunConfig::from_env`] and
+    /// [`KeyMinter::from_external_env`](crate::client::auth::KeyMinter::from_external_env)
+    /// do: `default_for` is the "attach to an already-running external
+    /// server" constructor, and for such a server the admin credentials are
+    /// inherently environmental — the eval did not boot it, so it cannot know
+    /// the secret any other way. Callers that own the boot (docker harness)
+    /// set the fields explicitly afterward.
     #[must_use]
     pub fn default_for(endpoint: SocketAddr) -> Self {
+        let admin_secret = std::env::var(ENV_ADMIN_SECRET)
+            .ok()
+            .filter(|s| !s.is_empty())
+            .map(Secret::new);
+        let admin_port = std::env::var(ENV_ADMIN_PORT)
+            .ok()
+            .and_then(|p| p.parse::<u16>().ok())
+            .unwrap_or(DEFAULT_ADMIN_PORT);
+
         Self {
             endpoint,
             max_questions: None,
@@ -90,8 +109,8 @@ impl RunConfig {
             persist_spaces: None,
             read_only_spaces: None,
             namespace: DEFAULT_NAMESPACE.to_string(),
-            admin_secret: None,
-            admin_port: DEFAULT_ADMIN_PORT,
+            admin_secret,
+            admin_port,
             only_conversation: None,
             verify_memory_list: false,
         }
