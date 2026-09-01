@@ -19,8 +19,10 @@
 
 use std::net::SocketAddr;
 
-use brain_db_sdk::wire::types::{ActAs, TxnBeginRequest, TxnCommitRequest};
-use brain_db_sdk::{new_id, EncodeBuilder, ForgetBuilder, RecallBuilder};
+use std::time::Duration;
+
+use brain_db_sdk::wire::types::{ActAs, MemoryResult, RecallRequest, TxnBeginRequest, TxnCommitRequest};
+use brain_db_sdk::{new_id, BrainClient, EncodeBuilder, ForgetBuilder, RecallBuilder};
 
 use crate::client::auth::KeyMinter;
 use crate::client::harness::{BrainEvalHarness, HarnessError};
@@ -81,8 +83,33 @@ impl ScenarioOutcome {
 }
 
 /// Did any returned hit's text contain `needle`?
-fn any_text_contains(hits: &[brain_db_sdk::wire::types::MemoryResult], needle: &str) -> bool {
+fn any_text_contains(hits: &[MemoryResult], needle: &str) -> bool {
     hits.iter().any(|m| m.text.contains(needle))
+}
+
+/// Poll a RECALL until `matches` holds over the returned memories, or a
+/// bounded budget (10 attempts × 200 ms ≈ 2 s) is exhausted; returns the
+/// last attempt's memories either way.
+///
+/// A committed write is durable at TXN_COMMIT, but the commit does not itself
+/// block for the post-commit async derivation that makes it recallable, so the
+/// first plain read after commit can race the indexer. `wait_derived` on the
+/// buffered encode covers only the pre-commit visibility; this covers the
+/// post-commit read.
+async fn poll_recall_until(
+    client: &BrainClient,
+    request: &RecallRequest,
+    matches: impl Fn(&[MemoryResult]) -> bool,
+) -> Result<Vec<MemoryResult>, HarnessError> {
+    let mut hits = client.recall(request).await?.memories;
+    for _ in 0..9 {
+        if matches(&hits) {
+            return Ok(hits);
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        hits = client.recall(request).await?.memories;
+    }
+    Ok(hits)
 }
 
 /// One space's memories must not surface in another space's recall.
@@ -104,7 +131,7 @@ async fn run_isolation(endpoint: SocketAddr) -> Result<ScenarioOutcome, HarnessE
     let secret = format!("{marker}: the vault code is alpha-tango-niner");
     space_a
         .client()
-        .encode(&EncodeBuilder::new(secret.as_str()).build())
+        .encode(&EncodeBuilder::new(secret.as_str()).wait_derived().build())
         .await?;
 
     let b_hits = space_b.recall(&marker, 10).await?;
@@ -148,7 +175,7 @@ async fn run_forget(endpoint: SocketAddr) -> Result<ScenarioOutcome, HarnessErro
 
     let enc = h
         .client()
-        .encode(&EncodeBuilder::new(text.as_str()).build())
+        .encode(&EncodeBuilder::new(text.as_str()).wait_derived().build())
         .await?;
 
     let before = h.recall(&marker, 10).await?;
@@ -204,7 +231,7 @@ async fn run_txn(endpoint: SocketAddr) -> Result<ScenarioOutcome, HarnessError> 
         })
         .await?;
 
-    let mut enc = EncodeBuilder::new(text.as_str()).build();
+    let mut enc = EncodeBuilder::new(text.as_str()).wait_derived().build();
     enc.txn_id = Some(txn_id);
     h.client().encode(&enc).await?;
 
@@ -218,8 +245,13 @@ async fn run_txn(endpoint: SocketAddr) -> Result<ScenarioOutcome, HarnessError> 
 
     h.client().txn_commit(&TxnCommitRequest { txn_id }).await?;
 
-    // After commit, a plain (no-txn) read must see it.
-    let after = h.recall(&marker, 10).await?;
+    // After commit, a plain (no-txn) read must see it. The commit is durable
+    // but does not block for post-commit derivation, so poll briefly.
+    let plain = RecallBuilder::new(marker.as_str())
+        .max_results(10)
+        .include_text(true)
+        .build();
+    let after = poll_recall_until(h.client(), &plain, |hits| any_text_contains(hits, &marker)).await?;
     h.close().await?;
 
     if !any_text_contains(&in_txn_hits, &marker) {
@@ -228,7 +260,7 @@ async fn run_txn(endpoint: SocketAddr) -> Result<ScenarioOutcome, HarnessError> 
             "in-txn read did not see the txn's buffered write",
         ));
     }
-    if !any_text_contains(&after.memories, &marker) {
+    if !any_text_contains(&after, &marker) {
         return Ok(ScenarioOutcome::fail(
             NAME,
             "committed write not visible to a plain read",
@@ -295,18 +327,22 @@ async fn run_delegated_txn(endpoint: SocketAddr) -> Result<ScenarioOutcome, Harn
     // Buffer a write (the encode runs as the connection's own identity — the
     // delegation fixed at begin steers where the commit lands), then COMMIT
     // (which carries no act_as of its own).
-    let mut enc = EncodeBuilder::new(text.as_str()).build();
+    let mut enc = EncodeBuilder::new(text.as_str()).wait_derived().build();
     enc.txn_id = Some(txn_id);
     let mem = h.client().encode(&enc).await?.memory_id;
     h.client().txn_commit(&TxnCommitRequest { txn_id }).await?;
 
-    // The delegated identity must see the committed memory.
+    // The delegated identity must see the committed memory. The commit is
+    // durable but does not block for post-commit derivation, so poll briefly.
     let mut delegated_recall = RecallBuilder::new(marker.as_str())
         .max_results(50)
         .include_text(true)
         .build();
     delegated_recall.act_as = Some(delegated);
-    let delegated_hits = h.client().recall(&delegated_recall).await?.memories;
+    let delegated_hits = poll_recall_until(h.client(), &delegated_recall, |hits| {
+        hits.iter().any(|m| m.memory_id == mem) || any_text_contains(hits, &marker)
+    })
+    .await?;
 
     // The connection's OWN identity (act_as = None) must NOT — proving the
     // write landed in the delegated space, not the committing connection's.
