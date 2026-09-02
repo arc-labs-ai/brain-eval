@@ -28,18 +28,22 @@ pub mod entity_merge;
 pub mod extraction;
 pub mod read_introspect;
 pub mod relation;
+pub mod relation_traverse;
 pub mod schema;
 pub mod schema_drop;
 pub mod statement;
+pub mod statement_depth;
 
 pub use entity::entity_lifecycle;
 pub use entity_merge::entity_merge_unmerge;
 pub use extraction::extraction_pipeline;
 pub use read_introspect::read_introspection;
 pub use relation::relation_lifecycle;
+pub use relation_traverse::relation_traversal;
 pub use schema::schema_lifecycle;
 pub use schema_drop::schema_drop;
 pub use statement::statement_lifecycle;
+pub use statement_depth::statement_depth;
 
 /// Built-in `Person` entity type id, seeded by the `brain:` system schema
 /// at byte zero (see `crates/brain-metadata/src/system_schema/schema.brain`).
@@ -55,7 +59,9 @@ pub async fn run_typed_graph_scenarios(endpoint: SocketAddr) -> Vec<ScenarioOutc
         entity_lifecycle(endpoint).await,
         entity_merge_unmerge(endpoint).await,
         statement_lifecycle(endpoint).await,
+        statement_depth(endpoint).await,
         relation_lifecycle(endpoint).await,
+        relation_traversal(endpoint).await,
         read_introspection(endpoint).await,
         extraction_pipeline(endpoint).await,
     ]
