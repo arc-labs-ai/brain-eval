@@ -411,6 +411,25 @@ impl ServerHandle {
         }
     }
 
+    /// Gracefully stop the container: `docker stop` sends SIGTERM and gives the
+    /// server its shutdown-drain window (then SIGKILLs after docker's timeout),
+    /// after which the container is removed — the volume is untouched. Contrast
+    /// [`Self::stop`], which is `docker rm -f` (immediate SIGKILL, the crash
+    /// path). Returns whether the graceful `docker stop` reported success; the
+    /// subsequent remove is best-effort. A no-op (returns `true`) for external
+    /// or kept servers.
+    pub async fn stop_graceful(self) -> bool {
+        if self.keep {
+            return true;
+        }
+        if let Backing::Container { name } = &self.backing {
+            let stopped = run_docker(&["stop", name]).await.is_ok();
+            let _ = run_docker(&["rm", "-f", name]).await;
+            return stopped;
+        }
+        true
+    }
+
     /// Poll the container's docker healthcheck until `healthy`.
     async fn wait_healthy(&self, name: &str, timeout: Duration) -> Result<(), ServerError> {
         let deadline = Instant::now() + timeout;

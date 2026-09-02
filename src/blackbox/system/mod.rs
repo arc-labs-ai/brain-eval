@@ -39,7 +39,7 @@ pub mod chaos;
 pub use chaos::kill_during_write;
 
 pub mod durability;
-pub use durability::restart_recovery;
+pub use durability::{graceful_shutdown_drain, restart_recovery};
 
 pub mod invariants;
 pub use invariants::run_invariant_scenarios;
