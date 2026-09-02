@@ -43,12 +43,52 @@ pub fn supersession_stress_competitor_baselines() -> Vec<CompetitorRow> {
     Vec::new()
 }
 
-/// Empty placeholder — fill in as DMR numbers from competitors are
-/// collected. (The original MemGPT paper reported DMR; that's the
-/// natural first row to add.)
+/// Published DMR (Deep Memory Retrieval) numbers from the MemGPT paper,
+/// which introduced the benchmark. All figures are LLM-judge accuracy from
+/// Table 2 ("Deep memory retrieval (DMR) performance"), Packer et al.,
+/// *MemGPT: Towards LLMs as Operating Systems*, 2023 (arXiv:2310.08560).
+///
+/// Note the shape of this benchmark: the fixed-context baselines are weak
+/// (~0.32–0.39) because the gold turn falls outside the window, while
+/// MemGPT — which can page the past conversation into recall memory —
+/// nearly saturates it (~0.93). DMR is therefore a *floor* test (can the
+/// system retrieve a single planted fact at all), not a discriminating
+/// one; treat a Brain DMR score near MemGPT's as table-stakes, and lean on
+/// LongMemEval / LoCoMo for the harder signal.
 #[must_use]
 pub fn dmr_competitor_baselines() -> Vec<CompetitorRow> {
-    Vec::new()
+    vec![
+        CompetitorRow {
+            system: "GPT-4 (fixed-context)".into(),
+            accuracy: 0.321,
+            source: "Packer et al., MemGPT, 2023 (arXiv:2310.08560) — Table 2".into(),
+            note: "Fixed-context baseline: the gold turn is outside the window, so retrieval \
+                   fails on most questions. The natural floor to clear."
+                .into(),
+        },
+        CompetitorRow {
+            system: "GPT-4 Turbo (fixed-context)".into(),
+            accuracy: 0.353,
+            source: "Packer et al., MemGPT, 2023 (arXiv:2310.08560) — Table 2".into(),
+            note: "Strongest fixed-context baseline in the paper; still far below any \
+                   memory-augmented system."
+                .into(),
+        },
+        CompetitorRow {
+            system: "MemGPT + GPT-4".into(),
+            accuracy: 0.925,
+            source: "Packer et al., MemGPT, 2023 (arXiv:2310.08560) — Table 2".into(),
+            note: "Pages past conversation into recall memory; near-saturates DMR. This is the \
+                   table-stakes bar, not a stretch target."
+                .into(),
+        },
+        CompetitorRow {
+            system: "MemGPT + GPT-4 Turbo".into(),
+            accuracy: 0.934,
+            source: "Packer et al., MemGPT, 2023 (arXiv:2310.08560) — Table 2".into(),
+            note: "Best published DMR number in the introducing paper.".into(),
+        },
+    ]
 }
 
 /// Published LongMemEval-S numbers worth comparing against. Source
