@@ -273,6 +273,19 @@ pub async fn run_acceptance(cfg: AcceptanceConfig) -> AcceptanceReport {
                                 r.timeouts,
                             ),
                         });
+                        // Per-verb latency budget (spec §19.02 / acceptance
+                        // gate) under concurrency. A verb whose spec bounds
+                        // only P50 shows an unbounded (inf) P99 target.
+                        let lt = r.latency_target;
+                        gates.push(Gate {
+                            name: format!("latency:tput:{}", r.verb),
+                            perf: true,
+                            passed: r.meets_latency(),
+                            detail: format!(
+                                "p50 {:.2}ms (≤{:.0}) p99 {:.2}ms (≤{:.0})",
+                                r.p50_ms, lt.p50_ms, r.p99_ms, lt.p99_ms
+                            ),
+                        });
                     }
                     // Handling N concurrent clients with zero failed ops is a
                     // correctness property — it must hold on any hardware.
