@@ -71,8 +71,12 @@ async fn run(endpoint: SocketAddr) -> Result<ScenarioOutcome, RebuildScenarioErr
         format!("{marker}: Acme Robotics acquired a lidar startup last year."),
     ];
     for s in &seeds {
+        // wait_derived so the baseline recall below can't race the async
+        // indexer — a default Ack encode is WAL-durable but not yet indexed,
+        // which would make the pre-rebuild baseline flaky (and misattribute a
+        // race as a rebuild failure).
         h.client()
-            .encode(&EncodeBuilder::new(s.as_str()).build())
+            .encode(&EncodeBuilder::new(s.as_str()).wait_derived().build())
             .await?;
     }
 
