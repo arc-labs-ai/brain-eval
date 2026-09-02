@@ -26,6 +26,7 @@ use super::ScenarioOutcome;
 pub mod entity;
 pub mod entity_merge;
 pub mod extraction;
+pub mod provenance;
 pub mod read_introspect;
 pub mod relation;
 pub mod relation_traverse;
@@ -38,6 +39,7 @@ pub mod statement_depth;
 pub use entity::entity_lifecycle;
 pub use entity_merge::entity_merge_unmerge;
 pub use extraction::extraction_pipeline;
+pub use provenance::provenance_versioning;
 pub use read_introspect::read_introspection;
 pub use relation::relation_lifecycle;
 pub use relation_traverse::relation_traversal;
@@ -63,6 +65,7 @@ pub async fn run_typed_graph_scenarios(endpoint: SocketAddr) -> Vec<ScenarioOutc
         resolution_breadth(endpoint).await,
         statement_lifecycle(endpoint).await,
         statement_depth(endpoint).await,
+        provenance_versioning(endpoint).await,
         relation_lifecycle(endpoint).await,
         relation_traversal(endpoint).await,
         read_introspection(endpoint).await,
