@@ -19,8 +19,13 @@ pub mod lexical_stress;
 pub mod locomo;
 pub mod longmemeval;
 pub mod paraphrase_stress;
+pub mod pin;
 pub mod smoke;
 pub mod supersession_stress;
+
+pub use pin::{
+    contamination_report, pin_instances, verify_pin, ContaminationReport, DatasetPin, PinMismatch,
+};
 
 // Follow-ups:
 // pub mod beam;
