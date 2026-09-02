@@ -8,12 +8,10 @@
 //!   (`Resolved`, same id).
 //! - **No-match, no create** — resolving a never-seen name with
 //!   `allow_create = false` is `NotFound`, not a silent mint.
-//! - **No-match, allow_create** — with `allow_create = true` it is *also*
-//!   `NotFound` today: the resolver's tier-5 create-fallback is a server stub
-//!   (`crates/brain-ops/src/handlers/entity.rs` — "auto-create lands when the
-//!   resolver's tier 5 wires statement extraction"). This scenario gates that
-//!   current behaviour and calls it out; when tier 5 lands, flip the assertion
-//!   to expect `Created`.
+//! - **No-match, allow_create** — with `allow_create = true` on an unknown
+//!   name the resolver's tier-5 create-fallback mints a new entity and returns
+//!   `Created`; an exact re-resolve then returns that id. (`allow_create =
+//!   false` on an unknown name is `NotFound`, per the earlier bullet.)
 //! - **Rename keeps identity** — after `rename_entity(..., move_to_alias =
 //!   true)`, the entity resolves under its new canonical name *and* still under
 //!   the old name (now an alias): a rename moves the label, not the identity.
@@ -108,20 +106,37 @@ async fn run(endpoint: SocketAddr) -> Result<ScenarioOutcome, HarnessError> {
         ));
     }
 
-    // --- no match, allow_create (tier-5 create is a server stub) ---------
-    let miss_create = h
+    // --- no match, allow_create → tier-5 create-fallback → Created -------
+    let unseen_create = format!("Ferdinand Unseen {suffix}");
+    let created = h
         .client()
-        .resolve_entity(&resolve_req(&unseen, true))
+        .resolve_entity(&resolve_req(&unseen_create, true))
         .await?;
-    if miss_create.outcome != ResolutionOutcomeWire::NotFound {
+    if created.outcome != ResolutionOutcomeWire::Created || created.resolved_entity == [0u8; 16] {
         h.close().await?;
         return Ok(ScenarioOutcome::fail(
             NAME,
             format!(
-                "resolve with allow_create=true gave {:?}; current server stubs tier-5 create \
-                 and returns NotFound — if this changed to Created, tier 5 landed and this gate \
-                 needs updating",
-                miss_create.outcome
+                "resolve with allow_create=true on an unknown name gave {:?} id={:?}, \
+                 expected Created with a fresh id (tier-5 create-fallback)",
+                created.outcome, created.resolved_entity
+            ),
+        ));
+    }
+    // The freshly-created entity now resolves exactly to that id.
+    let refetch = h
+        .client()
+        .resolve_entity(&resolve_req(&unseen_create, false))
+        .await?;
+    if refetch.outcome != ResolutionOutcomeWire::Resolved
+        || refetch.resolved_entity != created.resolved_entity
+    {
+        h.close().await?;
+        return Ok(ScenarioOutcome::fail(
+            NAME,
+            format!(
+                "after create-fallback, exact re-resolve gave {:?} id={:?}, expected Resolved id={:?}",
+                refetch.outcome, refetch.resolved_entity, created.resolved_entity
             ),
         ));
     }
@@ -180,8 +195,8 @@ async fn run(endpoint: SocketAddr) -> Result<ScenarioOutcome, HarnessError> {
 
     Ok(ScenarioOutcome::pass(
         NAME,
-        "§19/06 resolution breadth: exact→Resolved; unknown→NotFound (both allow_create modes — \
-         tier-5 create is a documented server stub); rename kept identity under the new canonical \
-         name and the old-name alias",
+        "§19/06 resolution breadth: exact→Resolved; unknown+no-create→NotFound; \
+         unknown+allow_create→Created (tier-5 fallback) then re-resolves to that id; \
+         rename kept identity under the new canonical name and the old-name alias",
     ))
 }
