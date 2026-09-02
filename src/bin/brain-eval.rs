@@ -99,7 +99,11 @@ async fn async_main() -> ExitCode {
             };
             return probe_cmd(staged.as_deref(), external_endpoint).await;
         }
-        "acceptance" => return acceptance_cmd(resolve_endpoint(endpoint_override)).await,
+        "acceptance" => {
+            let full =
+                parse_bool_flag(&args[1..], "--full") || parse_bool_flag(&args[1..], "--scale");
+            return acceptance_cmd(resolve_endpoint(endpoint_override), full).await;
+        }
         "soak" => return soak_cmd(resolve_endpoint(endpoint_override)).await,
         // Recompute a full report from a streamed partial-results file —
         // recovers metrics from a run that was interrupted mid-flight.
@@ -345,17 +349,38 @@ async fn probe_cmd(benchmark: Option<&str>, external_endpoint: Option<SocketAddr
     }
 }
 
+/// Select the acceptance config: `--full`/`--scale` picks the
+/// reference-hardware full-scale config (1M memories, with the storage and
+/// chaos gates wired on); the default is the dev-box smoke config. Split out
+/// so the flag→config mapping is unit-testable without a live server.
+fn acceptance_config(endpoint: SocketAddr, full: bool) -> AcceptanceConfig {
+    if full {
+        AcceptanceConfig::full_scale(endpoint)
+    } else {
+        AcceptanceConfig::smoke(endpoint)
+    }
+}
+
 /// `brain-eval acceptance` — run the v1.0 acceptance suite and gate on it.
 /// Correctness gates must pass everywhere; performance gates are
 /// informational off reference hardware. `BRAIN_EVAL_RESTART_RECOVERY=1`
-/// adds the (slower, docker-booting) restart-recovery gate.
-async fn acceptance_cmd(endpoint: SocketAddr) -> ExitCode {
-    println!("brain-eval :: v1.0 acceptance");
+/// adds the (slower, docker-booting) restart-recovery gate. `--full`
+/// (alias `--scale`) selects the reference-hardware full-scale config,
+/// which additionally reaches the storage-footprint and kill-during-write
+/// chaos gates — far too heavy for an emulated dev container.
+async fn acceptance_cmd(endpoint: SocketAddr, full: bool) -> ExitCode {
+    println!(
+        "brain-eval :: v1.0 acceptance{}",
+        if full { " (full-scale)" } else { "" }
+    );
     println!("  endpoint : {endpoint}");
     println!();
 
-    let mut cfg = AcceptanceConfig::smoke(endpoint);
-    cfg.run_restart_recovery = std::env::var("BRAIN_EVAL_RESTART_RECOVERY").as_deref() == Ok("1");
+    let mut cfg = acceptance_config(endpoint, full);
+    // The env var opts smoke into the restart-recovery gate; it must not
+    // turn OFF the gate that `full_scale` already enables.
+    cfg.run_restart_recovery = cfg.run_restart_recovery
+        || std::env::var("BRAIN_EVAL_RESTART_RECOVERY").as_deref() == Ok("1");
 
     let report = run_acceptance(cfg).await;
     print!("{}", report.to_text());
@@ -564,6 +589,8 @@ fn print_usage() {
          \x20                 needs BRAIN__LLM__API_KEY; file datasets need BRAIN_EVAL_DATASETS_DIR;\n\
          \x20                 BRAIN_EVAL_MAX_QUESTIONS caps it; --endpoint targets an external server\n\
          \x20 acceptance      v1.0 acceptance suite (latency/throughput/recall/scenarios)\n\
+         \x20                 --full (alias --scale) runs the reference-scale config\n\
+         \x20                 (1M memories; adds the storage-footprint + chaos gates)\n\
          \x20                 BRAIN_EVAL_RESTART_RECOVERY=1 adds the restart-recovery gate\n\
          \x20 soak            sustained workload + drift sampling (BRAIN_EVAL_SOAK_SECS)\n\
          \x20 summary <file>  recompute metrics from a streamed .partial.jsonl\n\
@@ -578,4 +605,39 @@ fn print_usage() {
          \x20    BRAIN_EVAL_ADMIN_PORT     admin listener port (default 9092)\n\
          \x20    BRAIN_EVAL_NAMESPACE      tenant the run writes under (default eval)"
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ep() -> SocketAddr {
+        DEFAULT_ENDPOINT
+            .parse()
+            .expect("default endpoint literal parses")
+    }
+
+    #[test]
+    fn full_flag_selects_full_scale_with_storage_and_chaos_gates() {
+        let cfg = acceptance_config(ep(), true);
+        // The full-scale config is the only one that reaches these gates.
+        assert!(cfg.run_storage, "full-scale must enable the storage gate");
+        assert!(cfg.run_chaos, "full-scale must enable the chaos gate");
+        // Sanity: it is the reference-scale ingest, not the smoke ingest.
+        assert_eq!(cfg.scale.ingest_n, 1_000_000);
+    }
+
+    #[test]
+    fn default_no_flag_is_smoke_without_storage_or_chaos() {
+        let cfg = acceptance_config(ep(), false);
+        assert!(!cfg.run_storage, "smoke must not run the storage gate");
+        assert!(!cfg.run_chaos, "smoke must not run the chaos gate");
+        assert_eq!(cfg.scale.ingest_n, 200);
+    }
+
+    #[test]
+    fn full_and_scale_aliases_both_parse() {
+        assert!(parse_bool_flag(&["--full".to_string()], "--full"));
+        assert!(parse_bool_flag(&["--scale".to_string()], "--scale"));
+    }
 }
