@@ -146,8 +146,15 @@ fn read_baseline() -> RecallQualityReport {
         top_k: RECALL_TOP_K,
         recall_at_1,
         recall_at_k,
+        // The persisted baseline file only records recall@1/@K; the MRR/nDCG
+        // ranking metrics are advisory (not part of pass()), so a reconstructed
+        // baseline carries neutral zeros for them.
+        mrr: 0.0,
+        ndcg_at_k: 0.0,
         target_at_1: recall_at_1,
         target_at_k: recall_at_k,
+        target_mrr: 0.0,
+        target_ndcg: 0.0,
     }
 }
 

@@ -21,7 +21,9 @@ use std::net::SocketAddr;
 
 use std::time::Duration;
 
-use brain_db_sdk::wire::types::{ActAs, MemoryResult, RecallRequest, TxnBeginRequest, TxnCommitRequest};
+use brain_db_sdk::wire::types::{
+    ActAs, MemoryResult, RecallRequest, TxnBeginRequest, TxnCommitRequest,
+};
 use brain_db_sdk::{new_id, BrainClient, EncodeBuilder, ForgetBuilder, RecallBuilder};
 
 use crate::client::auth::KeyMinter;
@@ -251,7 +253,8 @@ async fn run_txn(endpoint: SocketAddr) -> Result<ScenarioOutcome, HarnessError> 
         .max_results(10)
         .include_text(true)
         .build();
-    let after = poll_recall_until(h.client(), &plain, |hits| any_text_contains(hits, &marker)).await?;
+    let after =
+        poll_recall_until(h.client(), &plain, |hits| any_text_contains(hits, &marker)).await?;
     h.close().await?;
 
     if !any_text_contains(&in_txn_hits, &marker) {
@@ -305,7 +308,7 @@ async fn run_delegated_txn(endpoint: SocketAddr) -> Result<ScenarioOutcome, Harn
         .mint_with_may_act(
             svc_space,
             &["ACT_AS", "STANDARD_SPACE"],
-            &[delegated_ns.clone()],
+            std::slice::from_ref(&delegated_ns),
         )
         .await?;
     let h = BrainEvalHarness::connect_with_token(endpoint, svc_space, token).await?;
