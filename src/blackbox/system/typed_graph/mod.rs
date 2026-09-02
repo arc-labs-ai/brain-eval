@@ -29,6 +29,7 @@ pub mod extraction;
 pub mod read_introspect;
 pub mod relation;
 pub mod relation_traverse;
+pub mod resolution_breadth;
 pub mod schema;
 pub mod schema_drop;
 pub mod statement;
@@ -40,6 +41,7 @@ pub use extraction::extraction_pipeline;
 pub use read_introspect::read_introspection;
 pub use relation::relation_lifecycle;
 pub use relation_traverse::relation_traversal;
+pub use resolution_breadth::resolution_breadth;
 pub use schema::schema_lifecycle;
 pub use schema_drop::schema_drop;
 pub use statement::statement_lifecycle;
@@ -58,6 +60,7 @@ pub async fn run_typed_graph_scenarios(endpoint: SocketAddr) -> Vec<ScenarioOutc
         schema_drop(endpoint).await,
         entity_lifecycle(endpoint).await,
         entity_merge_unmerge(endpoint).await,
+        resolution_breadth(endpoint).await,
         statement_lifecycle(endpoint).await,
         statement_depth(endpoint).await,
         relation_lifecycle(endpoint).await,
