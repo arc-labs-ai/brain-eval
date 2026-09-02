@@ -26,6 +26,7 @@ use super::ScenarioOutcome;
 pub mod entity;
 pub mod entity_merge;
 pub mod extraction;
+pub mod read_introspect;
 pub mod relation;
 pub mod schema;
 pub mod schema_drop;
@@ -34,6 +35,7 @@ pub mod statement;
 pub use entity::entity_lifecycle;
 pub use entity_merge::entity_merge_unmerge;
 pub use extraction::extraction_pipeline;
+pub use read_introspect::read_introspection;
 pub use relation::relation_lifecycle;
 pub use schema::schema_lifecycle;
 pub use schema_drop::schema_drop;
@@ -54,6 +56,7 @@ pub async fn run_typed_graph_scenarios(endpoint: SocketAddr) -> Vec<ScenarioOutc
         entity_merge_unmerge(endpoint).await,
         statement_lifecycle(endpoint).await,
         relation_lifecycle(endpoint).await,
+        read_introspection(endpoint).await,
         extraction_pipeline(endpoint).await,
     ]
 }

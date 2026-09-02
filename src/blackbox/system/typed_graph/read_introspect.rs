@@ -1,0 +1,195 @@
+//! Read-introspection scenario: TRACE-as-a-gate, filtered RECALL, and the
+//! Single/Many/None membership shape.
+//!
+//! The core scenarios assert *what* RECALL returns; this asserts *how* the read
+//! pipeline got there, treating the trace as a gate rather than a debug aid
+//! (§19/06 "read introspection & filtered recall"):
+//!
+//! - **TRACE** — `trace = true` must return a per-stage [`RecallTrace`] on the
+//!   final frame: all three retrievers reported, and a filter chain whose
+//!   counts are a monotonically non-increasing funnel
+//!   (`before >= after_type >= … >= after_limit`). A trace that skips a stage
+//!   or reports a count that grows through the funnel is a read-pipeline bug.
+//! - **Filtered recall** — a `kinds` filter must return only memories of the
+//!   requested kind; a `confidence_threshold` must not return anything below
+//!   it. These are the filter-chain stages, checked from the client side.
+//! - **Membership shape** — a cue that matches stored data resolves to `Single`
+//!   or `Many` (never `None`); a cue that matches nothing resolves to `None`
+//!   (honest abstention), never a fabricated `Single`.
+//!
+//! Like the other typed-graph scenarios this drives a live server and returns a
+//! [`ScenarioOutcome`]; markers are salted with the space-id hex so reruns
+//! don't collide on persistent state.
+
+use std::net::SocketAddr;
+
+use brain_db_sdk::wire::types::{AnswerKindWire, MemoryKindWire, RecallTraceFilterChain};
+use brain_db_sdk::{EncodeBuilder, RecallBuilder};
+
+use super::super::{hex16, ScenarioOutcome};
+use crate::client::harness::{BrainEvalHarness, HarnessError};
+
+const NAME: &str = "tg_read_introspection";
+
+/// Encode a small known set, then probe RECALL's trace, filters, and
+/// membership shape.
+pub async fn read_introspection(endpoint: SocketAddr) -> ScenarioOutcome {
+    match run(endpoint).await {
+        Ok(o) => o,
+        Err(e) => ScenarioOutcome::fail(NAME, format!("sdk error: {e}")),
+    }
+}
+
+/// The filter chain must be a non-increasing funnel — each stage can only
+/// remove candidates, never add them. Returns the first violating pair, if any.
+fn funnel_violation(fc: &RecallTraceFilterChain) -> Option<(&'static str, u32, &'static str, u32)> {
+    let stages: [(&str, u32); 8] = [
+        ("before", fc.before),
+        ("after_type", fc.after_type),
+        ("after_temporal", fc.after_temporal),
+        ("after_confidence", fc.after_confidence),
+        ("after_tombstone", fc.after_tombstone),
+        ("after_supersession", fc.after_supersession),
+        ("after_as_of", fc.after_as_of),
+        ("after_limit", fc.after_limit),
+    ];
+    stages
+        .windows(2)
+        .find(|w| w[1].1 > w[0].1)
+        .map(|w| (w[0].0, w[0].1, w[1].0, w[1].1))
+}
+
+async fn run(endpoint: SocketAddr) -> Result<ScenarioOutcome, HarnessError> {
+    let h = BrainEvalHarness::connect(endpoint).await?;
+    let marker = format!("introspect-{}", hex16(h.space_id()));
+
+    // A known set: three distinct, related memories under one marker so a
+    // marker cue matches several (Many-eligible), plus enough shared topic that
+    // the semantic and lexical lanes both have something to contribute.
+    let texts = [
+        format!("{marker}: the staging database migrated to region eu-west on Monday"),
+        format!("{marker}: the staging database rollback window is two hours"),
+        format!("{marker}: the staging database owner is the platform team"),
+    ];
+    for t in &texts {
+        h.client()
+            .encode(&EncodeBuilder::new(t.as_str()).wait_derived().build())
+            .await?;
+    }
+
+    // --- TRACE as a gate --------------------------------------------------
+    let trace_req = RecallBuilder::new(marker.as_str())
+        .max_results(10)
+        .include_text(true)
+        .trace(true)
+        .build();
+    let frames = h.client().recall_frames(&trace_req).await?;
+    let trace = frames.iter().rev().find_map(|f| f.trace.clone());
+    let Some(trace) = trace else {
+        h.close().await?;
+        return Ok(ScenarioOutcome::fail(
+            NAME,
+            "trace=true returned no RecallTrace on any frame",
+        ));
+    };
+    if trace.retrievers.len() != 3 {
+        h.close().await?;
+        return Ok(ScenarioOutcome::fail(
+            NAME,
+            format!(
+                "trace reported {} retrievers; the three lanes (semantic/lexical/graph) \
+                 must each report",
+                trace.retrievers.len()
+            ),
+        ));
+    }
+    if let Some((a, av, b, bv)) = funnel_violation(&trace.filter_chain) {
+        h.close().await?;
+        return Ok(ScenarioOutcome::fail(
+            NAME,
+            format!("filter chain is not a funnel: {a}={av} then {b}={bv} (grew)"),
+        ));
+    }
+
+    // --- kinds filter -----------------------------------------------------
+    // Fresh episodic writes: an Episodic-only filter must not surface a
+    // non-episodic memory.
+    let epi_req = RecallBuilder::new(marker.as_str())
+        .max_results(10)
+        .include_text(true)
+        .kinds(vec![MemoryKindWire::Episodic])
+        .build();
+    let epi = h.client().recall(&epi_req).await?;
+    if let Some(bad) = epi
+        .memories
+        .iter()
+        .find(|m| m.kind != MemoryKindWire::Episodic)
+    {
+        h.close().await?;
+        return Ok(ScenarioOutcome::fail(
+            NAME,
+            format!(
+                "kinds=[Episodic] returned a {:?} memory — type filter leaked",
+                bad.kind
+            ),
+        ));
+    }
+
+    // --- confidence threshold --------------------------------------------
+    // Nothing below the floor may come back. Use a mid floor so the assertion
+    // is about the filter honouring the bound, not about the corpus.
+    const FLOOR: f32 = 0.4;
+    let conf_req = RecallBuilder::new(marker.as_str())
+        .max_results(10)
+        .include_text(true)
+        .confidence_threshold(FLOOR)
+        .build();
+    let conf = h.client().recall(&conf_req).await?;
+    if let Some(bad) = conf.memories.iter().find(|m| m.confidence < FLOOR) {
+        h.close().await?;
+        return Ok(ScenarioOutcome::fail(
+            NAME,
+            format!(
+                "confidence_threshold={FLOOR} returned a memory at confidence {:.3}",
+                bad.confidence
+            ),
+        ));
+    }
+
+    // --- membership shape -------------------------------------------------
+    // The marker cue matches stored data: never None.
+    let hit = h.recall(&marker, 10).await?;
+    if matches!(hit.answer_kind, AnswerKindWire::None) {
+        h.close().await?;
+        return Ok(ScenarioOutcome::fail(
+            NAME,
+            "a cue matching three stored memories resolved to None (false abstention)",
+        ));
+    }
+    // A cue that matches nothing: honest None, never a fabricated Single.
+    let miss_cue = format!("nonexistent-topic-{}-quasar-flux", hex16(h.space_id()));
+    let miss = h.recall(&miss_cue, 10).await?;
+
+    h.close().await?;
+
+    if !matches!(miss.answer_kind, AnswerKindWire::None) {
+        return Ok(ScenarioOutcome::fail(
+            NAME,
+            format!(
+                "a cue matching nothing resolved to {:?} with {} memories \
+                 (should be an honest None)",
+                miss.answer_kind,
+                miss.memories.len()
+            ),
+        ));
+    }
+
+    Ok(ScenarioOutcome::pass(
+        NAME,
+        format!(
+            "§19/06 read introspection: trace funnel {}→{}, 3 lanes reported; \
+             kinds/confidence filters honoured; membership {:?} on hit, None on miss",
+            trace.filter_chain.before, trace.filter_chain.after_limit, hit.answer_kind
+        ),
+    ))
+}
