@@ -2,26 +2,32 @@
 //!
 //! The lifecycle scenario ([`super::entity`]) resolves an existing entity by
 //! its exact canonical name (tier 1, `Resolved`). This covers the §19/06
-//! resolution outcomes it does not:
+//! resolution outcomes it does not, gating only the confirmed contract:
 //!
+//! - **Exact resolve** — an existing entity resolves by its canonical name
+//!   (`Resolved`, same id).
 //! - **No-match, no create** — resolving a never-seen name with
-//!   `allow_create = false` is `NotFound` (tier 0), not a silent mint.
-//! - **No-match → create** — the same name with `allow_create = true` is
-//!   `Created`, returning a fresh non-zero id.
-//! - **Resolve the created one** — an exact re-resolve now returns `Resolved`
-//!   with that id (the create persisted; tier 1).
+//!   `allow_create = false` is `NotFound`, not a silent mint.
+//! - **No-match, allow_create** — with `allow_create = true` it is *also*
+//!   `NotFound` today: the resolver's tier-5 create-fallback is a server stub
+//!   (`crates/brain-ops/src/handlers/entity.rs` — "auto-create lands when the
+//!   resolver's tier 5 wires statement extraction"). This scenario gates that
+//!   current behaviour and calls it out; when tier 5 lands, flip the assertion
+//!   to expect `Created`.
 //! - **Rename keeps identity** — after `rename_entity(..., move_to_alias =
 //!   true)`, the entity resolves under its new canonical name *and* still under
 //!   the old name (now an alias): a rename moves the label, not the identity.
 //!
-//! The fuzzy / embedding tiers (2–3) are not asserted here: they depend on the
-//! resolver's similarity thresholds, which are not a stable client-side
-//! contract to gate on. This scenario stays on the deterministic outcomes.
+//! Not asserted: the fuzzy / embedding tiers (2–3). Tier 2 (trigram) exists but
+//! its threshold isn't a stable client contract; tier 3 (embedding) is unwired.
+//! The observe-only fuzzy scaffold ([`super::scaffolds`]) records those.
 
 use std::net::SocketAddr;
 
 use brain_db_sdk::new_id;
-use brain_db_sdk::wire::types::{EntityRenameRequest, EntityResolveRequest, ResolutionOutcomeWire};
+use brain_db_sdk::wire::types::{
+    EntityCreateRequest, EntityRenameRequest, EntityResolveRequest, ResolutionOutcomeWire,
+};
 
 use super::super::ScenarioOutcome;
 use super::PERSON_TYPE_ID;
@@ -30,7 +36,7 @@ use crate::client::harness::{BrainEvalHarness, HarnessError};
 
 const NAME: &str = "tg_resolution_breadth";
 
-/// Exercise NotFound / Created / Resolved outcomes and rename-preserves-identity.
+/// Exercise Resolved / NotFound outcomes and rename-preserves-identity.
 pub async fn resolution_breadth(endpoint: SocketAddr) -> ScenarioOutcome {
     match run(endpoint).await {
         Ok(o) => o,
@@ -52,14 +58,44 @@ fn resolve_req(name: &str, allow_create: bool) -> EntityResolveRequest {
 async fn run(endpoint: SocketAddr) -> Result<ScenarioOutcome, HarnessError> {
     let h = BrainEvalHarness::connect(endpoint).await?;
     let suffix = &hex16(h.space_id())[..12];
-    // A name unique to this run so the "never seen" precondition holds even
-    // across reruns against persistent state.
     let name = format!("Rosalind Franklin {suffix}");
 
-    // --- no match, no create --------------------------------------------
-    let miss = h
+    // Create deterministically (resolve-create is a server stub — see below).
+    let id = h
+        .client()
+        .create_entity(&EntityCreateRequest {
+            session_id: 0,
+            entity_type_id: PERSON_TYPE_ID,
+            canonical_name: name.clone(),
+            aliases: Vec::new(),
+            attributes_blob: Vec::new(),
+            request_id: new_id(),
+            act_as: None,
+        })
+        .await?
+        .entity_id;
+
+    // --- exact resolve (tier 1) -----------------------------------------
+    let hit = h
         .client()
         .resolve_entity(&resolve_req(&name, false))
+        .await?;
+    if hit.outcome != ResolutionOutcomeWire::Resolved || hit.resolved_entity != id {
+        h.close().await?;
+        return Ok(ScenarioOutcome::fail(
+            NAME,
+            format!(
+                "exact resolve gave outcome {:?} id={:?}, expected Resolved id={:?}",
+                hit.outcome, hit.resolved_entity, id
+            ),
+        ));
+    }
+
+    // --- no match, no create --------------------------------------------
+    let unseen = format!("Nikola Unseen {suffix}");
+    let miss = h
+        .client()
+        .resolve_entity(&resolve_req(&unseen, false))
         .await?;
     if miss.outcome != ResolutionOutcomeWire::NotFound {
         h.close().await?;
@@ -72,39 +108,20 @@ async fn run(endpoint: SocketAddr) -> Result<ScenarioOutcome, HarnessError> {
         ));
     }
 
-    // --- no match → create ----------------------------------------------
-    let created = h.client().resolve_entity(&resolve_req(&name, true)).await?;
-    if created.outcome != ResolutionOutcomeWire::Created {
-        h.close().await?;
-        return Ok(ScenarioOutcome::fail(
-            NAME,
-            format!(
-                "resolve with allow_create=true gave {:?}, expected Created",
-                created.outcome
-            ),
-        ));
-    }
-    let id = created.resolved_entity;
-    if id == [0u8; 16] {
-        h.close().await?;
-        return Ok(ScenarioOutcome::fail(
-            NAME,
-            "Created outcome returned an all-zero entity id",
-        ));
-    }
-
-    // --- resolve the created one exactly (tier 1) -----------------------
-    let hit = h
+    // --- no match, allow_create (tier-5 create is a server stub) ---------
+    let miss_create = h
         .client()
-        .resolve_entity(&resolve_req(&name, false))
+        .resolve_entity(&resolve_req(&unseen, true))
         .await?;
-    if hit.outcome != ResolutionOutcomeWire::Resolved || hit.resolved_entity != id {
+    if miss_create.outcome != ResolutionOutcomeWire::NotFound {
         h.close().await?;
         return Ok(ScenarioOutcome::fail(
             NAME,
             format!(
-                "re-resolve of the created entity gave outcome {:?} id={:?}, expected Resolved id={:?}",
-                hit.outcome, hit.resolved_entity, id
+                "resolve with allow_create=true gave {:?}; current server stubs tier-5 create \
+                 and returns NotFound — if this changed to Created, tier 5 landed and this gate \
+                 needs updating",
+                miss_create.outcome
             ),
         ));
     }
@@ -163,8 +180,8 @@ async fn run(endpoint: SocketAddr) -> Result<ScenarioOutcome, HarnessError> {
 
     Ok(ScenarioOutcome::pass(
         NAME,
-        "§19/06 resolution breadth: NotFound (no create) → Created (allow_create) → \
-         Resolved (exact); rename kept identity under both the new canonical name and \
-         the old-name alias",
+        "§19/06 resolution breadth: exact→Resolved; unknown→NotFound (both allow_create modes — \
+         tier-5 create is a documented server stub); rename kept identity under the new canonical \
+         name and the old-name alias",
     ))
 }

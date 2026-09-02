@@ -70,7 +70,8 @@ async fn run(endpoint: SocketAddr) -> Result<ScenarioOutcome, HarnessError> {
     h.client()
         .tombstone_statement(&StatementTombstoneRequest {
             statement_id: tomb_id,
-            reason: 0,
+            // TombstoneReason::UserRequest (valid caller byte is 1..=4).
+            reason: 2,
             reason_message: "eval tombstone".to_string(),
             request_id: new_id(),
         })
@@ -114,7 +115,9 @@ async fn run(endpoint: SocketAddr) -> Result<ScenarioOutcome, HarnessError> {
         .client()
         .retract_statement(&brain_db_sdk::wire::types::StatementRetractRequest {
             statement_id: retract_id,
-            reason: 0,
+            // Caller audit reason byte must be 1..=4; the retract handler stamps
+            // TombstoneReason::Retract (5) itself regardless of this value.
+            reason: 2,
             reason_message: "eval retract".to_string(),
             request_id: new_id(),
         })

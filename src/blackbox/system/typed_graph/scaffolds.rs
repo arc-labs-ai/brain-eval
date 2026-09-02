@@ -115,6 +115,38 @@ async fn run_schema_transition(endpoint: SocketAddr) -> Result<ScenarioOutcome, 
     let predicate = format!("{ns}:temperament");
     let now = unix_nanos_now();
 
+    // A namespace with NO uploaded schema is schemaless (open-vocab): the
+    // server interns any predicate and accepts the write. The "undeclared →
+    // rejected" contract only applies once the namespace HAS an active schema.
+    // So first make the namespace strict by declaring some *other* predicate,
+    // and only then is an undeclared `temperament` a genuine rejection case.
+    let anchor_doc = format!(
+        "namespace {ns}\n\
+         define predicate anchor {{\n\
+         \x20\x20\x20\x20kind: Fact\n\
+         \x20\x20\x20\x20object: Value<text>\n\
+         }}\n"
+    );
+    let anchor_up = h
+        .client()
+        .upload_schema(&SchemaUploadRequest {
+            schema_document: anchor_doc,
+            dry_run: false,
+            allow_breaking: false,
+            request_id: new_id(),
+        })
+        .await?;
+    if !anchor_up.validation_errors.is_empty() {
+        h.close().await?;
+        return Ok(ScenarioOutcome::fail(
+            T_SCHEMA,
+            format!(
+                "initial schema upload reported errors: {:?}",
+                anchor_up.validation_errors
+            ),
+        ));
+    }
+
     let make_req = |value: &str| StatementCreateRequest {
         session_id: 0,
         kind: StatementKindWire::Fact,
@@ -132,23 +164,25 @@ async fn run_schema_transition(endpoint: SocketAddr) -> Result<ScenarioOutcome, 
         act_as: None,
     };
 
-    // Before declaring the predicate: an explicit create must be rejected.
+    // Namespace is now strict but `temperament` is undeclared → must be rejected.
     let before = h.client().create_statement(&make_req("calm")).await;
-    let rejected_detail =
-        match &before {
-            Ok(_) => {
-                h.close().await?;
-                // Safe-invariant violation: an undeclared explicit create succeeded.
-                return Ok(ScenarioOutcome::fail(
+    let rejected_detail = match &before {
+        Ok(_) => {
+            h.close().await?;
+            // Safe-invariant violation: an undeclared explicit create in a
+            // schema'd namespace succeeded.
+            return Ok(ScenarioOutcome::fail(
                 T_SCHEMA,
-                format!("explicit STATEMENT_CREATE on undeclared predicate {predicate} SUCCEEDED — \
-                         should be rejected"),
+                format!(
+                    "explicit STATEMENT_CREATE on undeclared predicate {predicate} in a schema'd \
+                     namespace SUCCEEDED — should be rejected"
+                ),
             ));
-            }
-            Err(e) => format!("undeclared create rejected as: {e}"),
-        };
+        }
+        Err(e) => format!("undeclared create rejected as: {e}"),
+    };
 
-    // Declare the predicate, then the same create must be accepted.
+    // Declare `temperament` (additive merge → new version), then it's accepted.
     let doc = format!(
         "namespace {ns}\n\
          define predicate temperament {{\n\
@@ -182,8 +216,9 @@ async fn run_schema_transition(endpoint: SocketAddr) -> Result<ScenarioOutcome, 
         Ok(_) => Ok(ScenarioOutcome::advisory(
             T_SCHEMA,
             format!(
-                "transition holds: {rejected_detail}; after SCHEMA_UPLOAD the same create \
-                 was accepted. FLAGGED: exact reject-error kind (confirm live)."
+                "transition holds: in a schema'd namespace {rejected_detail}; after declaring the \
+                 predicate the same create was accepted. FLAGGED: exact reject-error kind, and the \
+                 schemaless (no-schema = open-vocab) nuance (confirm live)."
             ),
         )),
         Err(e) => Ok(ScenarioOutcome::fail(
