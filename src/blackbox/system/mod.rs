@@ -54,7 +54,7 @@ pub mod storage;
 pub use storage::storage_footprint;
 
 pub mod typed_graph;
-pub use typed_graph::run_typed_graph_scenarios;
+pub use typed_graph::{run_typed_graph_scaffolds, run_typed_graph_scenarios};
 
 /// Pass/fail result of one scenario.
 #[derive(Debug, Clone)]
@@ -65,6 +65,14 @@ pub struct ScenarioOutcome {
     pub passed: bool,
     /// Human-readable explanation (why it passed / how it failed).
     pub detail: String,
+    /// Advisory (observe-only) outcome: it exercised a path whose exact server
+    /// behaviour isn't yet a gated contract, so it records what it saw for
+    /// later live confirmation instead of failing the suite. Advisory outcomes
+    /// are printed but never counted against the acceptance gate. A `false`
+    /// `passed` on an advisory outcome still means a *safe* invariant it did
+    /// gate was violated (a real bug) — advisory only softens the flagged,
+    /// behaviour-dependent assertion.
+    pub advisory: bool,
 }
 
 impl ScenarioOutcome {
@@ -73,6 +81,7 @@ impl ScenarioOutcome {
             name,
             passed: true,
             detail: detail.into(),
+            advisory: false,
         }
     }
     fn fail(name: &'static str, detail: impl Into<String>) -> Self {
@@ -80,6 +89,20 @@ impl ScenarioOutcome {
             name,
             passed: false,
             detail: detail.into(),
+            advisory: false,
+        }
+    }
+    /// An observe-only outcome for a scaffold: the safe invariants held, and
+    /// `detail` records the behaviour observed on the flagged path. Never fails
+    /// the acceptance gate — it exists so a live run surfaces the real
+    /// behaviour of a deferred §19/06 item rather than baking a guess into a
+    /// hard assertion.
+    fn advisory(name: &'static str, detail: impl Into<String>) -> Self {
+        Self {
+            name,
+            passed: true,
+            detail: detail.into(),
+            advisory: true,
         }
     }
 }
