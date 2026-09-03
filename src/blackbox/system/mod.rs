@@ -205,9 +205,7 @@ pub async fn plan_reason_isolation(endpoint: SocketAddr) -> ScenarioOutcome {
     }
 }
 
-async fn run_plan_reason_isolation(
-    endpoint: SocketAddr,
-) -> Result<ScenarioOutcome, HarnessError> {
+async fn run_plan_reason_isolation(endpoint: SocketAddr) -> Result<ScenarioOutcome, HarnessError> {
     const NAME: &str = "plan_reason_isolation";
     let space_a = BrainEvalHarness::connect(endpoint).await?;
     let space_b = BrainEvalHarness::connect(endpoint).await?;

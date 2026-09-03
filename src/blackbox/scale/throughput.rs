@@ -53,10 +53,16 @@ use crate::client::harness::HarnessError;
 
 /// Built-in `Person` entity type id (seeded `brain:` schema).
 const PERSON_TYPE_ID: u32 = 1;
-/// Non-stateful Fact predicate with a `Value<text>` object — cumulative,
-/// so concurrent creates append rather than contending on one supersession
-/// chain (which `brain:current_role`, being stateful, would do).
-const STATEMENT_PREDICATE: &str = "brain:has_name";
+/// Local predicate name for the STATEMENT_CREATE load. Qualified at the use
+/// site with the connection's own namespace (see [`run_one`]) rather than the
+/// `brain:` system namespace: `brain:` is always schema'd and declares only
+/// the five `behavior_*` predicates, so an explicit STATEMENT_CREATE naming
+/// any other `brain:` predicate is (correctly) rejected `PredicateNotInSchema`.
+/// The eval's own namespace is schemaless, so the predicate is coined on the
+/// fly and a `Fact` with a `Value<text>` object is cumulative — concurrent
+/// creates append rather than contending on one supersession chain (which a
+/// stateful kind would do).
+const STATEMENT_PREDICATE_NAME: &str = "has_name";
 /// Seeded symmetric many-to-many relation type.
 const RELATION_TYPE: &str = "brain:related_to";
 /// Per-request deadline for the load connections — generous, so a slow op
@@ -572,7 +578,7 @@ async fn run_one(client: &BrainClient, plan: &WorkerPlan, seq: u64) -> Result<()
                 session_id: 0,
                 kind: StatementKindWire::Fact,
                 subject: *subject,
-                predicate: STATEMENT_PREDICATE.to_string(),
+                predicate: format!("{}:{STATEMENT_PREDICATE_NAME}", client.namespace()),
                 object: StatementObjectWire::Value(StatementValueWire::Text(format!("name-{seq}"))),
                 confidence: 0.9,
                 evidence: EvidenceRefWire::Inline(Vec::new()),
