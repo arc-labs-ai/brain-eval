@@ -17,6 +17,8 @@ pub enum ReporterKind {
     Json,
     /// ASCII-table text summary.
     Text,
+    /// Self-contained HTML page (all CSS inlined, no external requests).
+    Html,
 }
 
 /// Runtime configuration for [`crate::bench::EvalRunner::run`].
@@ -104,7 +106,7 @@ impl RunConfig {
             max_questions: None,
             max_results: 50,
             output_dir: PathBuf::from("target/eval-reports"),
-            reporters: vec![ReporterKind::Json, ReporterKind::Text],
+            reporters: vec![ReporterKind::Json, ReporterKind::Text, ReporterKind::Html],
             question_types: None,
             persist_spaces: None,
             read_only_spaces: None,
@@ -155,17 +157,18 @@ impl RunConfig {
             .unwrap_or_else(|_| "target/eval-reports".to_owned());
 
         let formats_str =
-            std::env::var("BRAIN_EVAL_FORMATS").unwrap_or_else(|_| "json,text".to_owned());
+            std::env::var("BRAIN_EVAL_FORMATS").unwrap_or_else(|_| "json,text,html".to_owned());
         let reporters: Vec<ReporterKind> = formats_str
             .split(',')
             .filter_map(|s| match s.trim().to_ascii_lowercase().as_str() {
                 "json" => Some(ReporterKind::Json),
                 "text" | "txt" => Some(ReporterKind::Text),
+                "html" => Some(ReporterKind::Html),
                 _ => None,
             })
             .collect();
         let reporters = if reporters.is_empty() {
-            vec![ReporterKind::Json, ReporterKind::Text]
+            vec![ReporterKind::Json, ReporterKind::Text, ReporterKind::Html]
         } else {
             reporters
         };

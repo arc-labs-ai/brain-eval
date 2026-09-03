@@ -1,10 +1,12 @@
 //! Pluggable reporters: write a [`crate::bench::report::shape::BenchmarkReport`]
-//! to disk in one of several formats. Currently JSON and text.
+//! to disk in one of several formats. Currently JSON, text, and a
+//! self-contained HTML page.
 
 use std::path::Path;
 
 use crate::bench::report::shape::BenchmarkReport;
 
+pub mod html;
 pub mod json;
 pub mod run_json;
 pub mod text;

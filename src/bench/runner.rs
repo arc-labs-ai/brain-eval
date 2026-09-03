@@ -26,7 +26,7 @@ use crate::bench::core::instance::{EvalInstance, QuestionType};
 use crate::bench::core::outcome::{AnswerKind, JudgeResult, QuestionResult, Verdict};
 use crate::bench::report::baselines::CompetitorBaselines;
 use crate::bench::report::format::{
-    json::JsonReporter, run_json::JsonRunReporter, text::TextReporter, Reporter,
+    html::HtmlReporter, json::JsonReporter, run_json::JsonRunReporter, text::TextReporter, Reporter,
 };
 use crate::bench::report::run_report::{
     ConversationWrite, DrainBarrierStats, ExtractionHealth, FailStage, FailureAttribution,
@@ -756,10 +756,12 @@ impl EvalRunner {
             let path = match kind {
                 ReporterKind::Json => self.config.output_dir.join(format!("{stem}.json")),
                 ReporterKind::Text => self.config.output_dir.join(format!("{stem}.txt")),
+                ReporterKind::Html => self.config.output_dir.join(format!("{stem}.html")),
             };
             let result: std::io::Result<()> = match kind {
                 ReporterKind::Json => JsonReporter.write(report, &path),
                 ReporterKind::Text => TextReporter.write(report, &path),
+                ReporterKind::Html => HtmlReporter.write(report, &path),
             };
             if let Err(ref e) = result {
                 warn!(reporter = ?kind, error = %e, "reporter failed");
