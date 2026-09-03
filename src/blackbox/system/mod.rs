@@ -5,6 +5,9 @@
 //!
 //! - [`multi_space_isolation`] — one space's memories are invisible to
 //!   another.
+//! - [`plan_reason_isolation`] — the graph-walk read verbs (PLAN / REASON)
+//!   honour the same tenant wall: a `ByMemoryId` seed naming another space's
+//!   memory surfaces nothing.
 //! - [`encode_recall_forget`] — a memory is recallable, then gone after
 //!   FORGET.
 //! - [`txn_read_your_writes`] — a write buffered in a txn is visible to
@@ -22,7 +25,8 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use brain_db_sdk::wire::types::{
-    ActAs, MemoryResult, RecallRequest, TxnBeginRequest, TxnCommitRequest,
+    ActAs, MemoryResult, ObservationInput, PlanBudget, PlanRequest, PlanState, ReasonRequest,
+    RecallRequest, TxnBeginRequest, TxnCommitRequest,
 };
 use brain_db_sdk::{new_id, BrainClient, EncodeBuilder, ForgetBuilder, RecallBuilder};
 
@@ -180,6 +184,126 @@ async fn run_isolation(endpoint: SocketAddr) -> Result<ScenarioOutcome, HarnessE
     Ok(ScenarioOutcome::pass(
         NAME,
         "A sees its memory; B (different space) does not",
+    ))
+}
+
+/// The graph-walk read verbs (PLAN / REASON) must honour the tenant wall too,
+/// not just RECALL.
+///
+/// PLAN and REASON accept a `ByMemoryId` seed. If seed resolution skips the
+/// scope check, a caller in space B can name space A's memory id and have the
+/// walk hydrate and surface A's text — a cross-tenant read that never touches
+/// RECALL. Space B seeds both verbs on A's just-written memory id and asserts
+/// that no returned step / inference carries A's marker text or its id. This
+/// is a hard isolation invariant (a leak is a real breach), so it fails the
+/// suite rather than being advisory.
+pub async fn plan_reason_isolation(endpoint: SocketAddr) -> ScenarioOutcome {
+    const NAME: &str = "plan_reason_isolation";
+    match run_plan_reason_isolation(endpoint).await {
+        Ok(outcome) => outcome,
+        Err(e) => ScenarioOutcome::fail(NAME, format!("sdk error: {e}")),
+    }
+}
+
+async fn run_plan_reason_isolation(
+    endpoint: SocketAddr,
+) -> Result<ScenarioOutcome, HarnessError> {
+    const NAME: &str = "plan_reason_isolation";
+    let space_a = BrainEvalHarness::connect(endpoint).await?;
+    let space_b = BrainEvalHarness::connect(endpoint).await?;
+
+    // A unique marker keyed by space A's id so repeated runs don't collide.
+    let marker = format!("planreason-isolation-{}", hex16(space_a.space_id()));
+    let secret = format!("{marker}: the launch key rotates every friday");
+    let victim = space_a
+        .client()
+        .encode(&EncodeBuilder::new(secret.as_str()).wait_derived().build())
+        .await?
+        .memory_id;
+
+    // Sanity: A really can reach its own memory (the marker landed + derived).
+    let a_hits = space_a.recall(&marker, 10).await?;
+    if !any_text_contains(&a_hits.memories, &marker) {
+        space_a.close().await?;
+        space_b.close().await?;
+        return Ok(ScenarioOutcome::fail(
+            NAME,
+            "space A could not recall its own just-written memory (setup failed)",
+        ));
+    }
+
+    // --- PLAN from space B, seeded on space A's memory id ---------------
+    let plan_steps = space_b
+        .client()
+        .plan(&PlanRequest {
+            start: PlanState::ByMemoryId(victim),
+            goal: PlanState::ByMemoryId(victim),
+            budget: PlanBudget {
+                max_steps: 8,
+                max_wall_time_ms: 5_000,
+                max_branches_explored: 64,
+            },
+            strategy_hint: None,
+            session_filter: None,
+            request_id: Some(new_id()),
+            txn_id: None,
+            trace: false,
+            act_as: None,
+        })
+        .await?;
+    if let Some(step) = plan_steps
+        .iter()
+        .find(|s| s.memory_id == victim || s.text.contains(&marker))
+    {
+        space_a.close().await?;
+        space_b.close().await?;
+        return Ok(ScenarioOutcome::fail(
+            NAME,
+            format!(
+                "PLAN from space B surfaced space A's memory (step {}, id_match={}) — cross-tenant seed leak",
+                step.step_index,
+                step.memory_id == victim
+            ),
+        ));
+    }
+
+    // --- REASON from space B, seeded on space A's memory id -------------
+    let inferences = space_b
+        .client()
+        .reason(&ReasonRequest {
+            observation: ObservationInput::ByMemoryId(victim),
+            depth: 2,
+            confidence_threshold: 0.0,
+            session_filter: None,
+            max_inferences: 8,
+            budget_wall_time_ms: 5_000,
+            request_id: Some(new_id()),
+            txn_id: None,
+            trace: false,
+            act_as: None,
+        })
+        .await?;
+    if let Some(inf) = inferences.iter().find(|inf| {
+        inf.claim.contains(&marker)
+            || inf.supporting_memories.contains(&victim)
+            || inf.contradicting_memories.contains(&victim)
+    }) {
+        space_a.close().await?;
+        space_b.close().await?;
+        return Ok(ScenarioOutcome::fail(
+            NAME,
+            format!(
+                "REASON from space B surfaced space A's memory (inference {}) — cross-tenant seed leak",
+                inf.step_index
+            ),
+        ));
+    }
+
+    space_a.close().await?;
+    space_b.close().await?;
+    Ok(ScenarioOutcome::pass(
+        NAME,
+        "neither PLAN nor REASON in space B could reach space A's memory via a ByMemoryId seed",
     ))
 }
 
@@ -401,6 +525,7 @@ async fn run_delegated_txn(endpoint: SocketAddr) -> Result<ScenarioOutcome, Harn
 pub async fn run_core_scenarios(endpoint: SocketAddr) -> Vec<ScenarioOutcome> {
     vec![
         multi_space_isolation(endpoint).await,
+        plan_reason_isolation(endpoint).await,
         encode_recall_forget(endpoint).await,
         txn_read_your_writes(endpoint).await,
         delegated_txn(endpoint).await,
