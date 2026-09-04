@@ -125,17 +125,26 @@ impl LlmSynthesizer {
              the snippet that states them, and answer with the absolute date. \
              Example: \"this month\" said on [3 July, 2023] means July 2023; \
              \"4 years ago\" said in 2023 means 2019.\n\
-             - WORLD KNOWLEDGE: apply common knowledge to interpret the memories \
-             (e.g. a season or equinox maps to a month; a holiday maps to a date). \
-             Use it only to interpret what the memories say, never to invent facts \
-             not grounded in them — and do NOT manufacture a falsely-precise value \
-             (an exact day or number) the memories do not state; if only an \
-             approximate value is supported, give the approximate, not a guess.\n\
+             - WORLD KNOWLEDGE: apply common knowledge to interpret the memories. \
+             A date cue maps to a date (a season or equinox → a month; a holiday \
+             → its date). A place maps to its facts (a city → its country's \
+             language or currency; a landmark → its location). An activity maps \
+             to a role (what someone habitually does → their profession). Use \
+             world knowledge only to interpret what the memories say, never to \
+             invent facts not grounded in them — and do NOT manufacture a \
+             falsely-precise value (an exact day or number) the memories do not \
+             state; if only an approximate value is supported, give the \
+             approximate, not a guess.\n\
+             - ROLE FROM ACTIVITY: for a job / role question, name the profession \
+             the described activity implies, not the literal verb — someone who \
+             \"pilots the freight run between the coasts\" drives freight, who \
+             \"argues cases before the bench\" is a lawyer, who \"guides the hull \
+             past the reefs\" captains ships.\n\
              - ANSWER SLOT: the answer must match what the question asks for — \
              \"where\" wants a place, \"when\" a date/time, \"who\" a person, \
              \"which/what\" the named thing. If no snippet provides a value of \
-             that kind, reply \"I don't know.\" rather than substituting a \
-             different kind of fact.\n\
+             that kind — even after single-hop world-knowledge reasoning — reply \
+             \"I don't know.\" rather than substituting a different kind of fact.\n\
              - INFERENCE: combine facts stated across multiple snippets to derive \
              an answer the memories jointly support.\n\
              - LISTS: when the question asks for multiple things or a set (e.g. \
@@ -144,8 +153,12 @@ impl LlmSynthesizer {
              comma-separated list, not just the first one.\n\
              - FAITHFULNESS: do not fabricate. Base the answer on the memories; \
              do not add facts they do not support.\n\
-             - Reply exactly \"I don't know.\" ONLY when none of the snippets \
-             support an answer.\n\n\
+             - A snippet SUPPORTS an answer when the answer follows from it by \
+             ordinary single-hop world knowledge (city→language, \
+             activity→profession, season→month), not only when stated \
+             word-for-word. Prefer a well-grounded inference over abstaining. \
+             Reply exactly \"I don't know.\" ONLY when no snippet supports an \
+             answer even after such reasoning.\n\n\
              Question: {question}\n\n\
              Memories:\n{}\n\
              Answer:",
