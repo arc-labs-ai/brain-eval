@@ -151,6 +151,8 @@ async fn run(endpoint: SocketAddr) -> Result<ScenarioOutcome, HarnessError> {
         .statement_history(&StatementHistoryRequest {
             anchor_id: v2,
             include_tombstoned: true,
+            limit: 1000,
+            cursor: Vec::new(),
         })
         .await?;
     let has_v1 = history.iter().any(|s| s.statement_id == v1);
