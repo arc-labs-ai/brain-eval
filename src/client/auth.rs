@@ -211,7 +211,9 @@ impl KeyMinter {
     /// `permissions` must include `ACT_AS` for `may_act` to be meaningful;
     /// the server rejects a `may_act` allowlist without the grant, and an
     /// `ACT_AS` grant with an empty allowlist. Pass a single `"*"` entry for
-    /// the wildcard grant (server-side reserved for the service principal).
+    /// the wildcard grant: it is server-reserved for the service principal, so
+    /// the mint also sets `service_principal: true` (the admin plane now
+    /// requires that flag alongside a wildcard `may_act`, else it 400s).
     ///
     /// # Errors
     ///
@@ -224,13 +226,18 @@ impl KeyMinter {
         permissions: &[&str],
         may_act: &[String],
     ) -> Result<String, MintError> {
-        self.mint_with(serde_json::json!({
+        let mut body = serde_json::json!({
             "space_id_hex": hex_lower(&space_id),
             "namespace": self.namespace,
             "permissions": permissions,
             "may_act": may_act,
-        }))
-        .await
+        });
+        // A wildcard may_act is reserved for the service principal; the admin
+        // plane requires `service_principal: true` to accept it.
+        if may_act.len() == 1 && may_act[0] == "*" {
+            body["service_principal"] = serde_json::Value::Bool(true);
+        }
+        self.mint_with(body).await
     }
 
     /// POST a fully-formed mint body to the admin plane and return the raw

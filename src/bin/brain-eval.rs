@@ -105,6 +105,12 @@ async fn async_main() -> ExitCode {
             return acceptance_cmd(resolve_endpoint(endpoint_override), full).await;
         }
         "soak" => return soak_cmd(resolve_endpoint(endpoint_override)).await,
+        "namespace-wide" | "nswide" => {
+            return brain_eval::blackbox::namespace_wide::run_namespace_wide(resolve_endpoint(
+                endpoint_override,
+            ))
+            .await
+        }
         // Recompute a full report from a streamed partial-results file —
         // recovers metrics from a run that was interrupted mid-flight.
         "summary" | "report" => return summary_cmd(&args[1..]),
@@ -593,6 +599,7 @@ fn print_usage() {
          \x20                 (1M memories; adds the storage-footprint + chaos gates)\n\
          \x20                 BRAIN_EVAL_RESTART_RECOVERY=1 adds the restart-recovery gate\n\
          \x20 soak            sustained workload + drift sampling (BRAIN_EVAL_SOAK_SECS)\n\
+         \x20 namespace-wide  cross-space RECALL scope check (namespace-wide hits > space-scoped)\n\
          \x20 summary <file>  recompute metrics from a streamed .partial.jsonl\n\
          \x20                 (recover results from an interrupted run)\n\
          \n\
