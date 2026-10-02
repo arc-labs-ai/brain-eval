@@ -460,6 +460,7 @@ async fn run_delegated_txn(endpoint: SocketAddr) -> Result<ScenarioOutcome, Harn
     let delegated = ActAs {
         namespace: delegated_ns,
         space_id: delegated_space,
+        grant: 0,
     };
 
     // BEGIN as the delegated identity; delegation is fixed for the whole txn.

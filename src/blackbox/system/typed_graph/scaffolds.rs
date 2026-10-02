@@ -134,6 +134,7 @@ async fn run_schema_transition(endpoint: SocketAddr) -> Result<ScenarioOutcome, 
             dry_run: false,
             allow_breaking: false,
             request_id: new_id(),
+            act_as: None,
         })
         .await?;
     if !anchor_up.validation_errors.is_empty() {
@@ -197,6 +198,7 @@ async fn run_schema_transition(endpoint: SocketAddr) -> Result<ScenarioOutcome, 
             dry_run: false,
             allow_breaking: false,
             request_id: new_id(),
+            act_as: None,
         })
         .await?;
     if !up.validation_errors.is_empty() {
@@ -263,6 +265,7 @@ async fn run_contradiction(endpoint: SocketAddr) -> Result<ScenarioOutcome, Harn
             dry_run: false,
             allow_breaking: false,
             request_id: new_id(),
+            act_as: None,
         })
         .await?;
     if !up.validation_errors.is_empty() {

@@ -74,6 +74,7 @@ async fn run(endpoint: SocketAddr) -> Result<ScenarioOutcome, HarnessError> {
             dry_run: false,
             allow_breaking: false,
             request_id: new_id(),
+            act_as: None,
         })
         .await?;
     if !up.validation_errors.is_empty() {
@@ -98,6 +99,7 @@ async fn run(endpoint: SocketAddr) -> Result<ScenarioOutcome, HarnessError> {
             target_name: PREDICATE_NAME.to_string(),
             force: false,
             request_id: new_id(),
+            act_as: None,
         })
         .await?;
 
@@ -150,6 +152,7 @@ async fn run(endpoint: SocketAddr) -> Result<ScenarioOutcome, HarnessError> {
         .get_schema(&SchemaGetRequest {
             namespace: ns.clone(),
             version: 0,
+            act_as: None,
         })
         .await?;
     if got.schema_version != dropped_version {
@@ -172,6 +175,7 @@ async fn run(endpoint: SocketAddr) -> Result<ScenarioOutcome, HarnessError> {
             target_name: PREDICATE_NAME.to_string(),
             force: false,
             request_id: new_id(),
+            act_as: None,
         })
         .await?;
 

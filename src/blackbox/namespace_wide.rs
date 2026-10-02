@@ -227,7 +227,14 @@ async fn run(endpoint: SocketAddr) -> Result<ExitCode, HarnessError> {
     let deadline = Instant::now() + Duration::from_secs(30);
     let mut settled = false;
     while Instant::now() < deadline {
-        if answered(primary, settle_q.cue, settle_q.gold, RecallScopeWire::Namespace).await? {
+        if answered(
+            primary,
+            settle_q.cue,
+            settle_q.gold,
+            RecallScopeWire::Namespace,
+        )
+        .await?
+        {
             settled = true;
             break;
         }
