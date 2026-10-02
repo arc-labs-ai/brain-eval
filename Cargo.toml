@@ -64,6 +64,14 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # behind live-llm) and tiny.
 sha2 = "0.10"
 
+# Bounded concurrency for the runner. Conversations and their questions are
+# independent (each conversation owns a `SpaceId`), and the work is
+# network-bound — server round-trips and LLM judge calls — so overlapping
+# them is the difference between a run costing the SUM of its latencies and
+# costing their maximum. `buffer_unordered` gives that with a hard cap on
+# in-flight work, which doubles as the server-load and LLM rate limit.
+futures = { version = "0.3", default-features = false, features = ["std", "async-await"] }
+
 # HTTP client. Core dependency: the runner uses it for the admin
 # `/metrics` extraction-drain barrier (independent of LLM), and the
 # `live-llm` judge / synthesizer reuse it. rustls (no system OpenSSL);

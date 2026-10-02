@@ -275,7 +275,7 @@ mod tests {
 
         assert!(verify_pin(&pin, &[a.clone(), b.clone()]).is_ok());
         assert!(matches!(
-            verify_pin(&pin, &[a.clone()]),
+            verify_pin(&pin, std::slice::from_ref(&a)),
             Err(PinMismatch::Count { .. })
         ));
 

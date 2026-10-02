@@ -7,9 +7,9 @@
 //!
 //! Two modes, selected by `BRAIN_EVAL_ENDPOINT`:
 //!
-//! - **unset** — boots its own throwaway `brain:<tag>` container (needs Docker
-//!   + a `brain:<tag>` image + the `brain-models` volume; override the tag with
-//!   `BRAIN_EVAL_IMAGE_TAG`, default `latest`).
+//! - **unset** — boots its own throwaway `brain:<tag>` container (needs Docker,
+//!   a `brain:<tag>` image, and the `brain-models` volume; override the tag
+//!   with `BRAIN_EVAL_IMAGE_TAG`, default `latest`).
 //! - **set** — runs the same scenarios against that already-running server,
 //!   minting keys through its admin plane (`BRAIN_EVAL_ADMIN_SECRET` /
 //!   `BRAIN_EVAL_ADMIN_PORT`).

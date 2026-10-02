@@ -76,6 +76,43 @@ pub struct RunConfig {
     /// authenticated space, print a summary, and assert the listed count is
     /// > 0. `BRAIN_EVAL_VERIFY_MEMORY_LIST`.
     pub verify_memory_list: bool,
+    /// How many conversations the runner drives at once.
+    ///
+    /// Conversations are independent by construction — each gets its own
+    /// `SpaceId`, so their ingests and recalls cannot observe one another.
+    /// The runner was nonetheless strictly sequential, which made a run cost
+    /// the SUM of every conversation's server round-trips, LLM judge calls,
+    /// and extraction-drain wait rather than their overlap.
+    ///
+    /// `1` reproduces the old strictly-sequential behaviour exactly, and is
+    /// the escape hatch when a server is too small to take the load or a run
+    /// has to be bisected. Higher values bound in-flight work: connections,
+    /// concurrent server requests, and concurrent judge calls are all capped
+    /// by this one number, so it is also the LLM rate-limit control.
+    ///
+    /// `BRAIN_EVAL_CONCURRENCY`.
+    pub concurrency: usize,
+}
+
+/// Conversations in flight when nothing is configured.
+///
+/// Chosen to overlap latency without becoming a load test of the server the
+/// eval is supposed to be measuring: a benchmark that saturates the box
+/// reports its own queueing delay as Brain's latency. Raise it for a
+/// dedicated host; set `1` to go back to strict sequence.
+pub const DEFAULT_CONCURRENCY: usize = 8;
+
+/// Clamp a configured concurrency into the usable range.
+///
+/// `0` is meaningless (no work would ever run) and is treated as "unset" →
+/// the default, rather than hanging or silently doing nothing.
+#[must_use]
+pub fn normalize_concurrency(requested: usize) -> usize {
+    if requested == 0 {
+        DEFAULT_CONCURRENCY
+    } else {
+        requested
+    }
 }
 
 impl RunConfig {
@@ -115,6 +152,7 @@ impl RunConfig {
             admin_port,
             only_conversation: None,
             verify_memory_list: false,
+            concurrency: DEFAULT_CONCURRENCY,
         }
     }
 
@@ -214,6 +252,15 @@ impl RunConfig {
                 .as_str(),
             "1" | "true" | "yes" | "on"
         );
+        // An unparseable value falls back to the default rather than
+        // failing the run: a typo in a throughput knob must not stop an
+        // eval, and the effective value is reported in the run meta.
+        let concurrency = normalize_concurrency(
+            std::env::var("BRAIN_EVAL_CONCURRENCY")
+                .ok()
+                .and_then(|v| v.trim().parse::<usize>().ok())
+                .unwrap_or(DEFAULT_CONCURRENCY),
+        );
 
         Ok(Self {
             endpoint,
@@ -229,6 +276,7 @@ impl RunConfig {
             admin_port,
             only_conversation,
             verify_memory_list,
+            concurrency,
         })
     }
 
@@ -236,6 +284,14 @@ impl RunConfig {
     #[must_use]
     pub fn with_endpoint(mut self, ep: SocketAddr) -> Self {
         self.endpoint = ep;
+        self
+    }
+
+    /// Override how many conversations run at once. `0` means "use the
+    /// default"; `1` is strict sequence.
+    #[must_use]
+    pub fn with_concurrency(mut self, n: usize) -> Self {
+        self.concurrency = normalize_concurrency(n);
         self
     }
 
