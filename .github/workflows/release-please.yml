@@ -1,0 +1,48 @@
+name: Release Please
+
+# Keeps the version, the CHANGELOG and the release tag in step, so none of
+# those is a thing anyone has to remember.
+#
+# On every push to `main`, release-please reads the conventional commits since
+# the last release and maintains a single open "Release PR" that accumulates
+# them. That PR bumps the version in Cargo.toml (and Cargo.lock) and writes the
+# CHANGELOG. Merging it creates the `vX.Y.Z` tag, which is what `release.yml`
+# triggers on to publish.
+#
+# The PR is the review step. A misconfigured version bump or a wrong changelog
+# shows up as a diff to approve, not as a bad release — nothing reaches a
+# registry until that PR is merged and the publish workflow's `release`
+# environment gate is passed.
+#
+# This workflow deliberately does NOT publish and holds no registry
+# credentials. `release.yml` does that over OIDC; keeping a third-party action
+# out of the job that holds the publish identity is the point of the split.
+
+on:
+  push:
+    branches: [main]
+  # Lets a maintainer force a refresh of the Release PR without a new commit.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# One release PR at a time; a second push supersedes the first rather than
+# racing it.
+concurrency:
+  group: release-please
+  cancel-in-progress: false
+
+jobs:
+  release-please:
+    name: Maintain the release PR
+    runs-on: ubuntu-latest
+    permissions:
+      # Create the tag + GitHub Release on merge, and open/update the PR.
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: googleapis/release-please-action@v4
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json

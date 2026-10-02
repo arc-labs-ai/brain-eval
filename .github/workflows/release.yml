@@ -1,0 +1,97 @@
+name: Release
+
+# Publishes brain-eval to crates.io when a version tag is pushed.
+#
+# The tag normally comes from `release-please.yml`, not from a shell: merging
+# the Release PR it maintains bumps the version in Cargo.toml, writes the
+# CHANGELOG, and creates the tag. Tagging by hand still works and is the
+# escape hatch:
+#
+#   git tag v0.1.0 && git push origin v0.1.0
+#
+# The version check below is what makes both paths safe — a tag that disagrees
+# with the manifest cannot publish.
+#
+# Auth is OIDC **Trusted Publishing** — no long-lived registry token lives in
+# this repo. The job exchanges the workflow's short-lived GitHub OIDC identity
+# for a scoped, single-use publish credential. This is why it requests
+# `id-token: write`.
+#
+# ONE-TIME registry setup (done on crates.io, not here) — register this repo +
+# this workflow as a Trusted Publisher:
+#   crates.io → crate settings → Trusted Publishing → GitHub:
+#     owner arc-labs-ai, repo brain-eval, workflow release.yml, env release
+# Until that is configured the publish step fails closed (it never falls back
+# to a token).
+#
+# ORDERING: this crate depends on `brain-db-sdk`. That crate must already be
+# on crates.io at a matching version or `cargo publish` fails here — crates.io
+# refuses a crate whose dependencies it cannot resolve. Release brain-sdk first.
+#
+# The `release` environment gates the publish; require reviewers on it
+# (Settings → Environments → release) to add a manual approval before anything
+# goes public.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+# No repo-wide write; the job opts into `id-token: write` for OIDC.
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  crates-io:
+    name: Publish → crates.io
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: read
+      id-token: write # OIDC → crates.io trusted publishing
+    steps:
+      # The sibling brain-sdk checkout reproduces the layout the
+      # `[patch.crates-io]` / path dep assumes, so the pre-publish verify build
+      # resolves the same way it does locally and in CI.
+      - name: Checkout brain-eval
+        uses: actions/checkout@v4
+        with:
+          path: brain-eval
+      - name: Checkout brain-sdk (sibling, for the path dep)
+        uses: actions/checkout@v4
+        with:
+          repository: arc-labs-ai/brain-sdk
+          ref: main
+          path: brain-sdk
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: brain-eval
+
+      - name: Verify tag matches crate version
+        working-directory: brain-eval
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          CRATE="$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')"
+          echo "tag=$TAG crate=$CRATE"
+          test "$TAG" = "$CRATE" || { echo "::error::tag $TAG != crate version $CRATE"; exit 1; }
+
+      - name: Test
+        working-directory: brain-eval
+        run: cargo test --all-targets
+
+      # Exchanges the GitHub OIDC token for a short-lived crates.io token.
+      - name: Authenticate to crates.io (OIDC)
+        id: auth
+        uses: rust-lang/crates-io-auth-action@v1
+
+      - name: Publish
+        working-directory: brain-eval
+        run: cargo publish
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
