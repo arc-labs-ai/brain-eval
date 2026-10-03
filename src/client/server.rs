@@ -258,7 +258,7 @@ impl ServerHandle {
     /// handle whose [`endpoint`](Self::endpoint) is the data plane.
     pub async fn start_docker(opts: DockerServerOpts) -> Result<Self, ServerError> {
         // Best-effort: remove any stale container with the same name.
-        let _ = run_docker(&["rm", "-f", &opts.container_name]).await;
+        let _ = run_docker(&["rm", "-fv", &opts.container_name]).await;
 
         let data_map = format!("{}:8080", opts.data_port);
         let metrics_map = format!("{}:9091", opts.metrics_port);
@@ -468,12 +468,20 @@ impl ServerHandle {
 
     /// Stop and remove the container (no-op for an external server).
     /// Idempotent; also runs on drop.
+    ///
+    /// `rm -fv` so the anonymous volumes the image's `VOLUME` directive
+    /// creates go with the container. Without `-v` every booted container
+    /// left two dangling volumes behind, which is why a day of suite runs
+    /// accumulated 61 of them. Named volumes — the persistent data volume
+    /// the chaos and restart-recovery scenarios reuse across boots — are
+    /// explicitly *not* removed by `docker rm -v`; those stay the caller's
+    /// to clean up through [`remove_volume`].
     pub async fn stop(self) {
         if self.keep {
             return;
         }
         if let Backing::Container { name } = &self.backing {
-            let _ = run_docker(&["rm", "-f", name]).await;
+            let _ = run_docker(&["rm", "-fv", name]).await;
         }
     }
 
@@ -490,7 +498,7 @@ impl ServerHandle {
         }
         if let Backing::Container { name } = &self.backing {
             let stopped = run_docker(&["stop", name]).await.is_ok();
-            let _ = run_docker(&["rm", "-f", name]).await;
+            let _ = run_docker(&["rm", "-fv", name]).await;
             return stopped;
         }
         true
@@ -524,7 +532,7 @@ impl Drop for ServerHandle {
         if let Backing::Container { name } = &self.backing {
             // Best-effort synchronous cleanup — Drop can't await.
             let _ = std::process::Command::new("docker")
-                .args(["rm", "-f", name])
+                .args(["rm", "-fv", name])
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())
                 .status();
