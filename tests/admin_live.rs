@@ -17,24 +17,40 @@
 
 #![cfg(not(miri))]
 
-use std::net::SocketAddr;
+use std::time::Duration;
+
+use brain_eval::client::server::{DockerServerOpts, ServerHandle};
 
 use brain_eval::blackbox::system::run_admin_scenarios;
 
 /// The data-plane endpoint to test against. `None` (unset) skips.
-fn endpoint() -> Option<SocketAddr> {
-    std::env::var("BRAIN_EVAL_ENDPOINT")
-        .ok()
-        .and_then(|s| s.parse().ok())
+/// Attach to `BRAIN_EVAL_ENDPOINT` when the operator set one, otherwise boot
+/// a throwaway `brain:<tag>` container for this suite.
+///
+/// This used to return `Option` and the test returned early when it was
+/// `None` — which reported a PASS without contacting a server at all. A suite
+/// that goes green having exercised nothing is worse than one that fails:
+/// it hides every regression it was written to catch. Booting is the same
+/// path the other live suites take, so "no endpoint configured" is now a
+/// slower run rather than a silent skip.
+fn server_opts() -> DockerServerOpts {
+    DockerServerOpts {
+        container_name: "brain-eval-admin".to_string(),
+        data_port: 38090,
+        metrics_port: 39110,
+        admin_port: 39120,
+        health_timeout: Duration::from_secs(180),
+        ..DockerServerOpts::default()
+    }
 }
 
 #[tokio::test]
 #[ignore = "requires a running brain-server + admin secret; set BRAIN_EVAL_ENDPOINT + BRAIN_EVAL_ADMIN_SECRET"]
 async fn admin_scenarios_against_external_server() {
-    let Some(addr) = endpoint() else {
-        eprintln!("BRAIN_EVAL_ENDPOINT not set — skipping");
-        return;
-    };
+    let server = ServerHandle::from_env_or_docker(server_opts())
+        .await
+        .expect("server should be reachable (external) or boot and become healthy (docker)");
+    let addr = server.endpoint();
 
     let outcomes = run_admin_scenarios(addr).await;
 

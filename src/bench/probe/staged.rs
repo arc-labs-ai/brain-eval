@@ -157,7 +157,7 @@ pub async fn run_staged(
             // measuring the system and measuring a race.
             if let Some(addr) = metrics_addr {
                 println!("  draining write pipeline (waiting for all stages to settle)…");
-                crate::bench::runner::wait_for_write_flush(addr, conv.as_str()).await;
+                crate::client::drain::wait_for_write_flush(addr, conv.as_str()).await;
             }
 
             let yld = drain_and_count(&harness, &turn_texts).await?;

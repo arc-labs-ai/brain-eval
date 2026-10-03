@@ -48,6 +48,10 @@ enum Backing {
 /// A live `brain-server` endpoint plus ownership of whatever backs it.
 pub struct ServerHandle {
     endpoint: SocketAddr,
+    /// Where this server publishes `/metrics` and `/healthz`. Stored so a
+    /// caller can run the write-drain barrier against the same server it
+    /// just wrote to, without re-deriving the port from the environment.
+    metrics: SocketAddr,
     backing: Backing,
     /// Base URL of the admin plane (`http://host:port`) used to mint keys.
     admin_base: String,
@@ -207,6 +211,7 @@ impl ServerHandle {
             .unwrap_or(crate::client::auth::DEFAULT_ADMIN_PORT);
         Self {
             endpoint,
+            metrics: crate::client::metrics::metrics_addr_from_env(endpoint),
             backing: Backing::External,
             admin_base: format!("http://{}:{admin_port}", endpoint.ip()),
             admin_secret: Secret::new(
@@ -384,6 +389,9 @@ impl ServerHandle {
             endpoint: format!("127.0.0.1:{}", opts.data_port)
                 .parse()
                 .expect("invariant: literal 127.0.0.1:port is a valid SocketAddr"),
+            metrics: format!("127.0.0.1:{}", opts.metrics_port)
+                .parse()
+                .expect("invariant: literal 127.0.0.1:port is a valid SocketAddr"),
             backing: Backing::Container {
                 name: opts.container_name.clone(),
             },
@@ -398,13 +406,53 @@ impl ServerHandle {
         handle
             .wait_healthy(&opts.container_name, opts.health_timeout)
             .await?;
+        handle.publish_env_credentials(opts.admin_port, opts.metrics_port);
         Ok(handle)
+    }
+
+    /// Publish this container's credentials into the process environment so
+    /// the scenario entry points that resolve them ambiently —
+    /// [`KeyMinter::from_external_env`], [`AdminClient::from_external_env`],
+    /// [`crate::client::metrics::metrics_addr_from_env`] — find the server we
+    /// just booted.
+    ///
+    /// Those entry points exist because a scenario is handed only a data-plane
+    /// `SocketAddr`; it has no way to learn the admin secret of a server the
+    /// harness booted, and a docker-booted server's secret lives nowhere but
+    /// this handle. Without this, every such scenario fails with "no admin
+    /// secret configured" the moment a suite boots its own container instead
+    /// of attaching to an operator's.
+    ///
+    /// Scoped to the current process, and only ever called on the docker path:
+    /// [`external`](Self::external) reads these same variables rather than
+    /// writing them, so attaching to an operator's server never overwrites
+    /// what the operator set. Suites run one server per test process under
+    /// nextest, so a single ambient set is unambiguous.
+    fn publish_env_credentials(&self, admin_port: u16, metrics_port: u16) {
+        std::env::set_var(crate::client::auth::ENV_ADMIN_SECRET, EVAL_ADMIN_SECRET);
+        std::env::set_var(crate::client::auth::ENV_ADMIN_PORT, admin_port.to_string());
+        std::env::set_var(crate::client::auth::ENV_NAMESPACE, &self.namespace);
+        std::env::set_var(
+            crate::client::metrics::ENV_METRICS_PORT,
+            metrics_port.to_string(),
+        );
     }
 
     /// The data-plane endpoint a client should connect to.
     #[must_use]
     pub fn endpoint(&self) -> SocketAddr {
         self.endpoint
+    }
+
+    /// The address this server publishes `/metrics` and `/healthz` on.
+    ///
+    /// Pass it to [`crate::client::drain::wait_for_write_flush`] to block
+    /// until the asynchronous write pipeline has settled — an ENCODE ack
+    /// only means the memory is durable, not that its graph and embeddings
+    /// are in the read indexes yet.
+    #[must_use]
+    pub fn metrics_endpoint(&self) -> SocketAddr {
+        self.metrics
     }
 
     /// A [`KeyMinter`] bound to this server's admin plane and tenant

@@ -14,6 +14,7 @@
 
 pub mod admin;
 pub mod auth;
+pub mod drain;
 pub mod harness;
 pub mod metrics;
 pub mod server;
