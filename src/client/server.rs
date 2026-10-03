@@ -11,9 +11,10 @@
 //!   it (or calling [`ServerHandle::stop`]) removes the container.
 //!
 //! The docker path boots the **full production capability stack**: it mounts
-//! the `brain-models` volume (embed + cross-encoder reranker + gliner NER,
+//! the `brain-models` volume (embed only; rerank and the GLiNER
+//! classifier are left unconfigured,
 //! all provisioned by brain-db's `.devcontainer/bootstrap-model.sh`) and
-//! leaves every tier enabled — rerank and classifier load from those models,
+//! leaves the measured tiers enabled — the classifier loads from those models,
 //! so the acceptance suite exercises the real read + extraction paths rather
 //! than a degraded server. The LLM is the one external dependency, and a
 //! hard one: write-time HyPE is mandatory, so the server refuses to boot
@@ -76,10 +77,10 @@ pub struct DockerServerOpts {
     /// mints data-plane keys through this port. Kept distinct from
     /// `data_port` / `metrics_port`.
     pub admin_port: u16,
-    /// Named docker volume holding the full model set (embed + reranker +
+    /// Named docker volume holding the model set (embed + classifier; the
     /// gliner), mounted read-only at `/models`. Provisioned by brain-db's
     /// `.devcontainer/bootstrap-model.sh`. The three subdirectories
-    /// (`bge-small-en-v1.5`, `bge-reranker-base`, `gliner-small-v2.1`) are
+    /// (`bge-small-en-v1.5`, `gliner-small-v2.1`) are
     /// pointed at via the model env vars.
     pub models_volume: String,
     /// Per-shard arena size (env `BRAIN__SHARD__ARENA_CAPACITY_BYTES`).
@@ -325,20 +326,37 @@ impl ServerHandle {
             args.push("-v");
             args.push(mount);
         }
-        // Full capability stack: embed + reranker + gliner NER all load from
+        // Measured capability stack: embed + gliner NER load from
         // the mounted volume; every tier stays enabled so the suite tests the
         // real read + extraction paths. The model dirs stay bespoke deploy
-        // paths (`BRAIN_EMBED_MODEL_DIR` / `BRAIN_RERANK_MODEL_DIR`); the
+        // path (`BRAIN_EMBED_MODEL_DIR`); the
         // classifier model path and HyPE tuning ride the generic
         // `BRAIN__SECTION__FIELD` config override. HyPE itself is mandatory
         // and always-on — there is no enable flag.
         args.extend_from_slice(&[
             "-e",
             "BRAIN_EMBED_MODEL_DIR=/models/bge-small-en-v1.5",
+            // Rerank stays OFF. Brain treats an enabled-but-unloadable
+            // capability as a hard shard-spawn failure, so pointing at a
+            // cross-encoder the host may not have turns every self-booting
+            // live test into a 180s health-check timeout whose message says
+            // only "did not become healthy" — the one failure mode that
+            // costs three minutes to learn nothing. The suite does not
+            // measure rerank, so enabling it bought nothing and risked that.
             "-e",
-            "BRAIN_RERANK_MODEL_DIR=/models/bge-reranker-base",
-            "-e",
-            "BRAIN__EXTRACTORS__CLASSIFIER__MODEL_PATH=/models/gliner-small-v2.1",
+            "BRAIN__RERANK__ENABLED=false",
+            // The GLiNER classifier path is NOT pinned. Brain treats a
+            // configured-but-unloadable model as a hard shard-spawn failure,
+            // so naming a path the volume may not hold turns every
+            // self-booting test into a 180s "did not become healthy"
+            // timeout — and the harness deletes the container, so the real
+            // message ("not a directory: /models/gliner-small-v2.1") never
+            // reaches the operator.
+            //
+            // Left unset, Brain auto-discovers under XDG and skips the tier
+            // when nothing is there, which is exactly how the long-running
+            // dev server runs. Extraction does not depend on it: the LLM
+            // tier produces the entities the scenarios assert on.
             "-e",
             "BRAIN__EXTRACTORS__HYPE__NUM_QUESTIONS=6",
             "-e",
