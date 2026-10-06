@@ -11,12 +11,14 @@
 //!   it (or calling [`ServerHandle::stop`]) removes the container.
 //!
 //! The docker path boots the **full production capability stack**: it mounts
-//! the `brain-models` volume (embed only; rerank and the GLiNER
-//! classifier are left unconfigured,
-//! all provisioned by brain-db's `.devcontainer/bootstrap-model.sh`) and
-//! leaves the measured tiers enabled — the classifier loads from those models,
-//! so the acceptance suite exercises the real read + extraction paths rather
-//! than a degraded server. The LLM is the one external dependency, and a
+//! the `brain-models` volume (provisioned by brain-db's
+//! `.devcontainer/bootstrap-model.sh`) at the location Brain's own model
+//! discovery reads, `$XDG_DATA_HOME/brain/models`, so the embedder and the
+//! GLiNER classifier both resolve without any path being pinned. The
+//! classifier therefore loads whenever the volume carries the model, and
+//! degrades quietly when it does not — the suite exercises the real read +
+//! extraction paths rather than a server with its second tier dark. Rerank
+//! stays off deliberately; nothing here measures it. The LLM is the one external dependency, and a
 //! hard one: write-time HyPE is mandatory, so the server refuses to boot
 //! without a provider key. The eval forwards the single shared credential
 //! `BRAIN__LLM__API_KEY` from its own environment into the container
@@ -121,6 +123,17 @@ pub async fn remove_volume(volume: &str) {
     let _ = run_docker(&["volume", "rm", "-f", volume]).await;
 }
 
+/// Where the model volume is mounted inside the container. Chosen to match
+/// Brain's own XDG lookup (`$XDG_DATA_HOME/brain/models/<name>`) so nothing
+/// has to pin a model path.
+const MODELS_MOUNT: &str = "/xdg/brain/models";
+/// Points Brain's model discovery at [`MODELS_MOUNT`].
+const XDG_ENV: &str = "XDG_DATA_HOME=/xdg";
+/// The embedder is mandatory, so its directory stays explicit: a missing
+/// embed model should fail with that path in the message rather than fall
+/// through discovery.
+const EMBED_DIR_ENV: &str = "BRAIN_EMBED_MODEL_DIR=/xdg/brain/models/bge-small-en-v1.5";
+
 /// Errors from booting or probing a docker-backed server.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -134,8 +147,20 @@ pub enum ServerError {
         detail: String,
     },
     /// The container never reached the `healthy` state in time.
-    #[error("server did not become healthy within {0:?}")]
-    HealthTimeout(Duration),
+    ///
+    /// Carries the tail of the container's log, because the handle removes
+    /// the container on drop: without this the only thing an operator ever
+    /// saw was "did not become healthy", while the line that said why — a
+    /// model path that is not a directory, a rejected LLM key — died with
+    /// the container. A boot failure should cost one read, not a rerun.
+    #[error("server did not become healthy within {timeout:?}; container log tail:\n{log_tail}")]
+    HealthTimeout {
+        /// How long the harness waited for `healthy`.
+        timeout: Duration,
+        /// Tail of the container's log, captured before the container is
+        /// removed.
+        log_tail: String,
+    },
     /// `BRAIN_EVAL_ENDPOINT` was set but is not a valid `host:port`.
     #[error("BRAIN_EVAL_ENDPOINT is not a valid host:port: {0}")]
     BadEndpoint(String),
@@ -268,7 +293,13 @@ impl ServerHandle {
         let admin_map = format!("{}:9092", opts.admin_port);
         // The whole model volume mounts at /models; the env vars below point
         // each tier at its subdirectory.
-        let model_mount = format!("{}:/models:ro", opts.models_volume);
+        // Mounted where Brain already looks, not at a bespoke path: the
+        // classifier and the embedder both resolve
+        // `$XDG_DATA_HOME/brain/models/<name>`, and the volume's layout is
+        // already `bge-small-en-v1.5/` + `gliner-small-v2.1/` side by side.
+        // Lining the two up means every tier auto-discovers its model with
+        // no path pinned — see the `XDG_DATA_HOME` env below.
+        let model_mount = format!("{}:{MODELS_MOUNT}:ro", opts.models_volume);
         let arena_env = format!("BRAIN__SHARD__ARENA_CAPACITY_BYTES={}", opts.arena_capacity);
         let image = format!("brain:{}", opts.image_tag);
         // Optional persistent data volume (for restart-recovery).
@@ -340,7 +371,9 @@ impl ServerHandle {
         // and always-on — there is no enable flag.
         args.extend_from_slice(&[
             "-e",
-            "BRAIN_EMBED_MODEL_DIR=/models/bge-small-en-v1.5",
+            XDG_ENV,
+            "-e",
+            EMBED_DIR_ENV,
             // Rerank stays OFF. Brain treats an enabled-but-unloadable
             // capability as a hard shard-spawn failure, so pointing at a
             // cross-encoder the host may not have turns every self-booting
@@ -350,18 +383,15 @@ impl ServerHandle {
             // measure rerank, so enabling it bought nothing and risked that.
             "-e",
             "BRAIN__RERANK__ENABLED=false",
-            // The GLiNER classifier path is NOT pinned. Brain treats a
-            // configured-but-unloadable model as a hard shard-spawn failure,
-            // so naming a path the volume may not hold turns every
-            // self-booting test into a 180s "did not become healthy"
-            // timeout — and the harness deletes the container, so the real
-            // message ("not a directory: /models/gliner-small-v2.1") never
-            // reaches the operator.
-            //
-            // Left unset, Brain auto-discovers under XDG and skips the tier
-            // when nothing is there, which is exactly how the long-running
-            // dev server runs. Extraction does not depend on it: the LLM
-            // tier produces the entities the scenarios assert on.
+            // The GLiNER classifier path is still NOT pinned, and now it
+            // does not need to be. Brain treats a configured-but-unloadable
+            // model as a hard shard-spawn failure, so naming a path the
+            // volume may not hold turned every self-booting test into a 180s
+            // "did not become healthy" timeout. Mounting the volume at the
+            // XDG location instead means the tier loads when the model is
+            // there and degrades quietly when it is not — the same discovery
+            // the long-running dev server uses — so the suites exercise the
+            // classifier without the pinning trap.
             "-e",
             "BRAIN__EXTRACTORS__HYPE__NUM_QUESTIONS=6",
             "-e",
@@ -517,7 +547,12 @@ impl ServerHandle {
                 return Ok(());
             }
             if Instant::now() >= deadline {
-                return Err(ServerError::HealthTimeout(timeout));
+                // Read the log BEFORE returning: `Drop` removes the
+                // container, taking the cause with it.
+                let log_tail = run_docker(&["logs", "--tail", "40", name])
+                    .await
+                    .unwrap_or_else(|e| format!("(could not read container log: {e})"));
+                return Err(ServerError::HealthTimeout { timeout, log_tail });
             }
             sleep(Duration::from_millis(500)).await;
         }
@@ -557,4 +592,41 @@ async fn run_docker(args: &[&str]) -> Result<String, ServerError> {
         });
     }
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+#[cfg(test)]
+mod model_discovery_tests {
+    use super::{EMBED_DIR_ENV, MODELS_MOUNT, XDG_ENV};
+
+    /// The mount point and the env vars have to agree, or the classifier
+    /// silently goes dark again: Brain looks under
+    /// `$XDG_DATA_HOME/brain/models`, and a volume mounted anywhere else is
+    /// simply not found. That mismatch is exactly why the tier was inactive
+    /// in every self-booting suite, and it is invisible — the server boots
+    /// fine and just skips the tier — so it is worth a test rather than a
+    /// comment.
+    #[test]
+    fn the_mount_point_is_where_brain_looks_for_models() {
+        let xdg = XDG_ENV
+            .strip_prefix("XDG_DATA_HOME=")
+            .expect("XDG_ENV sets XDG_DATA_HOME");
+        assert_eq!(
+            MODELS_MOUNT,
+            format!("{xdg}/brain/models"),
+            "models must mount at $XDG_DATA_HOME/brain/models or discovery misses them"
+        );
+    }
+
+    /// The embedder is pinned by path, so that path must point inside the
+    /// same mount.
+    #[test]
+    fn the_embed_model_path_is_inside_the_mount() {
+        let dir = EMBED_DIR_ENV
+            .strip_prefix("BRAIN_EMBED_MODEL_DIR=")
+            .expect("EMBED_DIR_ENV sets BRAIN_EMBED_MODEL_DIR");
+        assert!(
+            dir.starts_with(&format!("{MODELS_MOUNT}/")),
+            "{dir} is not inside {MODELS_MOUNT}"
+        );
+    }
 }
