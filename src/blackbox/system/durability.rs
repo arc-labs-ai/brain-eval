@@ -87,16 +87,15 @@ async fn run_restart_recovery(
             BrainEvalHarness::connect_minted(&server2.key_minter(), server2.endpoint(), space_id)
                 .await
                 .map_err(|e| format!("connect #2: {e}"))?;
-        // Pull more than N so we can count distinct recovered facts.
-        let out = h
-            .recall(&marker, (N as u32) * 2)
+        // Count the durable rows, not RECALL hits. A restart interrupts the
+        // async derivation a recall depends on, so asking RECALL whether a
+        // write survived reports durable rows as lost — it failed here at
+        // 24/25 against a server that had lost nothing. See
+        // [`super::durable_active_memory_ids`].
+        let hits = super::durable_active_memory_ids(h.client(), &marker)
             .await
-            .map_err(|e| format!("recall after restart: {e}"))?;
-        let hits = out
-            .memories
-            .iter()
-            .filter(|m| m.text.contains(&marker))
-            .count();
+            .map_err(|e| format!("memory list after restart: {e}"))?
+            .len();
         h.close().await.map_err(|e| format!("close #2: {e}"))?;
         hits
     };

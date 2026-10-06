@@ -546,6 +546,74 @@ pub async fn run_admin_scenarios(endpoint: SocketAddr) -> Vec<ScenarioOutcome> {
 }
 
 /// Lowercase hex of a 16-byte id — a unique, collision-free marker suffix.
+/// MEMORY_LIST page size. The server validates this to `1..=100`.
+pub(crate) const MEMORY_LIST_PAGE: u32 = 100;
+
+/// Ids of the ACTIVE memories whose text contains `marker`, read straight
+/// off the durable rows via MEMORY_LIST.
+///
+/// Durability scenarios must not ask RECALL whether a write survived. An
+/// ENCODE ack means the record is on disk; being *retrievable* additionally
+/// needs the async derivation (extraction, statement embedding, the lexical
+/// index) that a restart or a SIGKILL is precisely what interrupts. Counting
+/// hits from RECALL therefore reports a durable row as lost and fails a
+/// healthy server — it did, twice: once in the chaos scenario ("17/18 ACKed
+/// writes survived") and once in restart recovery ("recovered 24/25
+/// memories"). MEMORY_LIST walks the tenant timeline with no query, no
+/// ranking and no derivation, which is the WAL-before-ack claim these
+/// scenarios actually make.
+///
+/// Both scenarios mint a fresh space per run, so enumerating the space is
+/// exact. Tombstoned rows are enumerated but excluded: a row that came back
+/// as a tombstone is not a survivor.
+pub(crate) async fn durable_active_memory_ids(
+    client: &BrainClient,
+    marker: &str,
+) -> Result<std::collections::HashSet<u128>, String> {
+    use brain_db_sdk::wire::types::{
+        MemoryListDirWire, MemoryListRequest, MemoryListSortWire, MemoryListTimeAxisWire,
+    };
+    let mut present = std::collections::HashSet::new();
+    let mut cursor: Vec<u8> = Vec::new();
+    loop {
+        let req = MemoryListRequest {
+            sort: MemoryListSortWire::Created,
+            dir: MemoryListDirWire::Asc,
+            limit: MEMORY_LIST_PAGE,
+            cursor: cursor.clone(),
+            kinds: Vec::new(),
+            include_tombstoned: true,
+            time_axis: MemoryListTimeAxisWire::Created,
+            from_unix_nanos: 0,
+            to_unix_nanos: 0,
+            salience_min: 0.0,
+            salience_max: 1.0,
+            text_contains: String::new(),
+            act_as: None,
+        };
+        let frames = client
+            .memory_list_frames(&req)
+            .await
+            .map_err(|e| e.to_string())?;
+        let (mut last_cursor, mut done) = (Vec::new(), true);
+        for frame in &frames {
+            for item in &frame.items {
+                // state 0 = active.
+                if item.state == 0 && item.text.contains(marker) {
+                    present.insert(u128::from_be_bytes(item.memory_id));
+                }
+            }
+            last_cursor = frame.next_cursor.clone();
+            done = frame.is_final;
+        }
+        if done || last_cursor.is_empty() {
+            break;
+        }
+        cursor = last_cursor;
+    }
+    Ok(present)
+}
+
 fn hex16(id: [u8; 16]) -> String {
     let mut s = String::with_capacity(32);
     for b in id {
