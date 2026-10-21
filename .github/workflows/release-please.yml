@@ -36,13 +36,14 @@ concurrency:
 jobs:
   release-please:
     name: Maintain the release PR
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     permissions:
       # Create the tag + GitHub Release on merge, and open/update the PR.
       contents: write
       pull-requests: write
     steps:
-      - uses: googleapis/release-please-action@v4
+      - uses: googleapis/release-please-action@v5
         with:
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN || secrets.GITHUB_TOKEN }}
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
