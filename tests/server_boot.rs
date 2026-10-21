@@ -17,6 +17,7 @@
 
 use std::time::Duration;
 
+use brain_eval::client::drain::wait_for_write_flush;
 use brain_eval::client::harness::BrainEvalHarness;
 use brain_eval::client::server::{DockerServerOpts, ServerHandle};
 
@@ -55,6 +56,17 @@ async fn start_docker_boots_a_usable_server() {
         .encode(&request)
         .await
         .expect("encode against booted server");
+
+    // ENCODE acks when the memory is durable, not when it is retrievable:
+    // the extractor and statement-embed workers still have to run before the
+    // graph reaches the read indexes. Without this barrier the recall below
+    // races them and the assertion fails on timing rather than on behaviour.
+    let drain = wait_for_write_flush(server.metrics_endpoint(), "server_boot").await;
+    assert!(
+        drain.flushed,
+        "write pipeline did not settle within the barrier's cap; \
+         recall below would be racing the extractor"
+    );
 
     let recall = harness
         .recall("amber dusk over Lisbon", 5)

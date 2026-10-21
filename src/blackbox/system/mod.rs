@@ -5,10 +5,16 @@
 //!
 //! - [`multi_space_isolation`] — one space's memories are invisible to
 //!   another.
+//! - [`plan_reason_isolation`] — the graph-walk read verbs (PLAN / REASON)
+//!   honour the same tenant wall: a `ByMemoryId` seed naming another space's
+//!   memory surfaces nothing.
 //! - [`encode_recall_forget`] — a memory is recallable, then gone after
 //!   FORGET.
 //! - [`txn_read_your_writes`] — a write buffered in a txn is visible to
 //!   reads inside that txn, and to everyone after commit.
+//! - [`delegated_txn`] — a txn begun with `act_as` commits its buffered
+//!   writes under the delegated identity (the shared-pool gateway model at
+//!   the transaction level).
 //!
 //! Each returns a [`ScenarioOutcome`]; [`run_core_scenarios`] runs the
 //! set. Heavier durability scenarios (restart-recovery, backfill, chaos)
@@ -16,25 +22,43 @@
 
 use std::net::SocketAddr;
 
-use brain_db_sdk::wire::types::{TxnBeginRequest, TxnCommitRequest};
-use brain_db_sdk::{new_id, EncodeBuilder, ForgetBuilder, RecallBuilder};
+use std::time::Duration;
 
+use brain_db_sdk::wire::types::{
+    ActAs, MemoryResult, ObservationInput, PlanBudget, PlanRequest, PlanState, ReasonRequest,
+    RecallRequest, TxnBeginRequest, TxnCommitRequest,
+};
+use brain_db_sdk::{new_id, BrainClient, EncodeBuilder, ForgetBuilder, RecallBuilder};
+
+use crate::client::auth::KeyMinter;
 use crate::client::harness::{BrainEvalHarness, HarnessError};
+
+pub mod audit;
+pub use audit::audit_derivation_logged;
+
+pub mod backfill;
+pub use backfill::resumable_backfill;
 
 pub mod chaos;
 pub use chaos::kill_during_write;
 
 pub mod durability;
-pub use durability::restart_recovery;
+pub use durability::{graceful_shutdown_drain, restart_recovery};
 
 pub mod invariants;
 pub use invariants::run_invariant_scenarios;
+
+pub mod metrics_families;
+pub use metrics_families::metrics_families_present;
+
+pub mod rebuild;
+pub use rebuild::index_rebuild;
 
 pub mod storage;
 pub use storage::storage_footprint;
 
 pub mod typed_graph;
-pub use typed_graph::run_typed_graph_scenarios;
+pub use typed_graph::{run_typed_graph_scaffolds, run_typed_graph_scenarios};
 
 /// Pass/fail result of one scenario.
 #[derive(Debug, Clone)]
@@ -45,6 +69,14 @@ pub struct ScenarioOutcome {
     pub passed: bool,
     /// Human-readable explanation (why it passed / how it failed).
     pub detail: String,
+    /// Advisory (observe-only) outcome: it exercised a path whose exact server
+    /// behaviour isn't yet a gated contract, so it records what it saw for
+    /// later live confirmation instead of failing the suite. Advisory outcomes
+    /// are printed but never counted against the acceptance gate. A `false`
+    /// `passed` on an advisory outcome still means a *safe* invariant it did
+    /// gate was violated (a real bug) — advisory only softens the flagged,
+    /// behaviour-dependent assertion.
+    pub advisory: bool,
 }
 
 impl ScenarioOutcome {
@@ -53,6 +85,7 @@ impl ScenarioOutcome {
             name,
             passed: true,
             detail: detail.into(),
+            advisory: false,
         }
     }
     fn fail(name: &'static str, detail: impl Into<String>) -> Self {
@@ -60,13 +93,52 @@ impl ScenarioOutcome {
             name,
             passed: false,
             detail: detail.into(),
+            advisory: false,
+        }
+    }
+    /// An observe-only outcome for a scaffold: the safe invariants held, and
+    /// `detail` records the behaviour observed on the flagged path. Never fails
+    /// the acceptance gate — it exists so a live run surfaces the real
+    /// behaviour of a deferred §19/06 item rather than baking a guess into a
+    /// hard assertion.
+    fn advisory(name: &'static str, detail: impl Into<String>) -> Self {
+        Self {
+            name,
+            passed: true,
+            detail: detail.into(),
+            advisory: true,
         }
     }
 }
 
 /// Did any returned hit's text contain `needle`?
-fn any_text_contains(hits: &[brain_db_sdk::wire::types::MemoryResult], needle: &str) -> bool {
+fn any_text_contains(hits: &[MemoryResult], needle: &str) -> bool {
     hits.iter().any(|m| m.text.contains(needle))
+}
+
+/// Poll a RECALL until `matches` holds over the returned memories, or a
+/// bounded budget (10 attempts × 200 ms ≈ 2 s) is exhausted; returns the
+/// last attempt's memories either way.
+///
+/// A committed write is durable at TXN_COMMIT, but the commit does not itself
+/// block for the post-commit async derivation that makes it recallable, so the
+/// first plain read after commit can race the indexer. `wait_derived` on the
+/// buffered encode covers only the pre-commit visibility; this covers the
+/// post-commit read.
+async fn poll_recall_until(
+    client: &BrainClient,
+    request: &RecallRequest,
+    matches: impl Fn(&[MemoryResult]) -> bool,
+) -> Result<Vec<MemoryResult>, HarnessError> {
+    let mut hits = client.recall(request).await?.memories;
+    for _ in 0..9 {
+        if matches(&hits) {
+            return Ok(hits);
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        hits = client.recall(request).await?.memories;
+    }
+    Ok(hits)
 }
 
 /// One space's memories must not surface in another space's recall.
@@ -88,7 +160,7 @@ async fn run_isolation(endpoint: SocketAddr) -> Result<ScenarioOutcome, HarnessE
     let secret = format!("{marker}: the vault code is alpha-tango-niner");
     space_a
         .client()
-        .encode(&EncodeBuilder::new(secret.as_str()).build())
+        .encode(&EncodeBuilder::new(secret.as_str()).wait_derived().build())
         .await?;
 
     let b_hits = space_b.recall(&marker, 10).await?;
@@ -115,6 +187,124 @@ async fn run_isolation(endpoint: SocketAddr) -> Result<ScenarioOutcome, HarnessE
     ))
 }
 
+/// The graph-walk read verbs (PLAN / REASON) must honour the tenant wall too,
+/// not just RECALL.
+///
+/// PLAN and REASON accept a `ByMemoryId` seed. If seed resolution skips the
+/// scope check, a caller in space B can name space A's memory id and have the
+/// walk hydrate and surface A's text — a cross-tenant read that never touches
+/// RECALL. Space B seeds both verbs on A's just-written memory id and asserts
+/// that no returned step / inference carries A's marker text or its id. This
+/// is a hard isolation invariant (a leak is a real breach), so it fails the
+/// suite rather than being advisory.
+pub async fn plan_reason_isolation(endpoint: SocketAddr) -> ScenarioOutcome {
+    const NAME: &str = "plan_reason_isolation";
+    match run_plan_reason_isolation(endpoint).await {
+        Ok(outcome) => outcome,
+        Err(e) => ScenarioOutcome::fail(NAME, format!("sdk error: {e}")),
+    }
+}
+
+async fn run_plan_reason_isolation(endpoint: SocketAddr) -> Result<ScenarioOutcome, HarnessError> {
+    const NAME: &str = "plan_reason_isolation";
+    let space_a = BrainEvalHarness::connect(endpoint).await?;
+    let space_b = BrainEvalHarness::connect(endpoint).await?;
+
+    // A unique marker keyed by space A's id so repeated runs don't collide.
+    let marker = format!("planreason-isolation-{}", hex16(space_a.space_id()));
+    let secret = format!("{marker}: the launch key rotates every friday");
+    let victim = space_a
+        .client()
+        .encode(&EncodeBuilder::new(secret.as_str()).wait_derived().build())
+        .await?
+        .memory_id;
+
+    // Sanity: A really can reach its own memory (the marker landed + derived).
+    let a_hits = space_a.recall(&marker, 10).await?;
+    if !any_text_contains(&a_hits.memories, &marker) {
+        space_a.close().await?;
+        space_b.close().await?;
+        return Ok(ScenarioOutcome::fail(
+            NAME,
+            "space A could not recall its own just-written memory (setup failed)",
+        ));
+    }
+
+    // --- PLAN from space B, seeded on space A's memory id ---------------
+    let plan_steps = space_b
+        .client()
+        .plan(&PlanRequest {
+            start: PlanState::ByMemoryId(victim),
+            goal: PlanState::ByMemoryId(victim),
+            budget: PlanBudget {
+                max_steps: 8,
+                max_wall_time_ms: 5_000,
+                max_branches_explored: 64,
+            },
+            strategy_hint: None,
+            session_filter: None,
+            request_id: Some(new_id()),
+            txn_id: None,
+            trace: false,
+            act_as: None,
+        })
+        .await?;
+    if let Some(step) = plan_steps
+        .iter()
+        .find(|s| s.memory_id == victim || s.text.contains(&marker))
+    {
+        space_a.close().await?;
+        space_b.close().await?;
+        return Ok(ScenarioOutcome::fail(
+            NAME,
+            format!(
+                "PLAN from space B surfaced space A's memory (step {}, id_match={}) — cross-tenant seed leak",
+                step.step_index,
+                step.memory_id == victim
+            ),
+        ));
+    }
+
+    // --- REASON from space B, seeded on space A's memory id -------------
+    let inferences = space_b
+        .client()
+        .reason(&ReasonRequest {
+            observation: ObservationInput::ByMemoryId(victim),
+            depth: 2,
+            confidence_threshold: 0.0,
+            session_filter: None,
+            max_inferences: 8,
+            budget_wall_time_ms: 5_000,
+            request_id: Some(new_id()),
+            txn_id: None,
+            trace: false,
+            act_as: None,
+        })
+        .await?;
+    if let Some(inf) = inferences.iter().find(|inf| {
+        inf.claim.contains(&marker)
+            || inf.supporting_memories.contains(&victim)
+            || inf.contradicting_memories.contains(&victim)
+    }) {
+        space_a.close().await?;
+        space_b.close().await?;
+        return Ok(ScenarioOutcome::fail(
+            NAME,
+            format!(
+                "REASON from space B surfaced space A's memory (inference {}) — cross-tenant seed leak",
+                inf.step_index
+            ),
+        ));
+    }
+
+    space_a.close().await?;
+    space_b.close().await?;
+    Ok(ScenarioOutcome::pass(
+        NAME,
+        "neither PLAN nor REASON in space B could reach space A's memory via a ByMemoryId seed",
+    ))
+}
+
 /// A memory is recallable after ENCODE and gone after FORGET.
 pub async fn encode_recall_forget(endpoint: SocketAddr) -> ScenarioOutcome {
     const NAME: &str = "encode_recall_forget";
@@ -132,7 +322,7 @@ async fn run_forget(endpoint: SocketAddr) -> Result<ScenarioOutcome, HarnessErro
 
     let enc = h
         .client()
-        .encode(&EncodeBuilder::new(text.as_str()).build())
+        .encode(&EncodeBuilder::new(text.as_str()).wait_derived().build())
         .await?;
 
     let before = h.recall(&marker, 10).await?;
@@ -184,10 +374,11 @@ async fn run_txn(endpoint: SocketAddr) -> Result<ScenarioOutcome, HarnessError> 
         .txn_begin(&TxnBeginRequest {
             txn_id,
             timeout_seconds: 30,
+            act_as: None,
         })
         .await?;
 
-    let mut enc = EncodeBuilder::new(text.as_str()).build();
+    let mut enc = EncodeBuilder::new(text.as_str()).wait_derived().build();
     enc.txn_id = Some(txn_id);
     h.client().encode(&enc).await?;
 
@@ -201,8 +392,14 @@ async fn run_txn(endpoint: SocketAddr) -> Result<ScenarioOutcome, HarnessError> 
 
     h.client().txn_commit(&TxnCommitRequest { txn_id }).await?;
 
-    // After commit, a plain (no-txn) read must see it.
-    let after = h.recall(&marker, 10).await?;
+    // After commit, a plain (no-txn) read must see it. The commit is durable
+    // but does not block for post-commit derivation, so poll briefly.
+    let plain = RecallBuilder::new(marker.as_str())
+        .max_results(10)
+        .include_text(true)
+        .build();
+    let after =
+        poll_recall_until(h.client(), &plain, |hits| any_text_contains(hits, &marker)).await?;
     h.close().await?;
 
     if !any_text_contains(&in_txn_hits, &marker) {
@@ -211,7 +408,7 @@ async fn run_txn(endpoint: SocketAddr) -> Result<ScenarioOutcome, HarnessError> 
             "in-txn read did not see the txn's buffered write",
         ));
     }
-    if !any_text_contains(&after.memories, &marker) {
+    if !any_text_contains(&after, &marker) {
         return Ok(ScenarioOutcome::fail(
             NAME,
             "committed write not visible to a plain read",
@@ -223,16 +420,200 @@ async fn run_txn(endpoint: SocketAddr) -> Result<ScenarioOutcome, HarnessError> 
     ))
 }
 
+/// A transaction begun with `act_as` commits its buffered writes under the
+/// delegated identity — the shared-pool gateway model at the transaction
+/// level. One service-principal connection opens a txn on behalf of a tenant,
+/// buffers a write as its own identity, and commits (TXN_COMMIT carries no
+/// `act_as`); the committed memory must be reachable by the tenant's effective
+/// identity and invisible to the connection's own identity.
+pub async fn delegated_txn(endpoint: SocketAddr) -> ScenarioOutcome {
+    const NAME: &str = "delegated_txn";
+    match run_delegated_txn(endpoint).await {
+        Ok(outcome) => outcome,
+        Err(e) => ScenarioOutcome::fail(NAME, format!("sdk error: {e}")),
+    }
+}
+
+async fn run_delegated_txn(endpoint: SocketAddr) -> Result<ScenarioOutcome, HarnessError> {
+    const NAME: &str = "delegated_txn";
+
+    // A single trusted service principal: ACT_AS grant + STANDARD_SPACE, with a
+    // may_act allowlist naming the delegated tenant namespace. This is the only
+    // credential the "gateway" holds. Each run derives a fresh delegated
+    // namespace/space so repeats never collide.
+    let svc_space = new_id();
+    let salt = hex16(svc_space);
+    let delegated_ns = format!("tenant_txn_{salt}");
+    let delegated_space = format!("space-txn-{salt}");
+    let marker = format!("delegated-txn-{salt}");
+    let text = format!("{marker}: the pager code is 8080");
+
+    let minter = KeyMinter::from_external_env(endpoint);
+    let token = minter
+        .mint_with_may_act(
+            svc_space,
+            &["ACT_AS", "STANDARD_SPACE"],
+            std::slice::from_ref(&delegated_ns),
+        )
+        .await?;
+    let h = BrainEvalHarness::connect_with_token(endpoint, svc_space, token).await?;
+    let delegated = ActAs {
+        namespace: delegated_ns,
+        space_id: delegated_space,
+        grant: 0,
+    };
+
+    // BEGIN as the delegated identity; delegation is fixed for the whole txn.
+    let txn_id = new_id();
+    h.client()
+        .txn_begin(&TxnBeginRequest {
+            txn_id,
+            timeout_seconds: 60,
+            act_as: Some(delegated.clone()),
+        })
+        .await?;
+
+    // Buffer a write (the encode runs as the connection's own identity — the
+    // delegation fixed at begin steers where the commit lands), then COMMIT
+    // (which carries no act_as of its own).
+    let mut enc = EncodeBuilder::new(text.as_str()).wait_derived().build();
+    enc.txn_id = Some(txn_id);
+    let mem = h.client().encode(&enc).await?.memory_id;
+    h.client().txn_commit(&TxnCommitRequest { txn_id }).await?;
+
+    // The delegated identity must see the committed memory. The commit is
+    // durable but does not block for post-commit derivation, so poll briefly.
+    let mut delegated_recall = RecallBuilder::new(marker.as_str())
+        .max_results(50)
+        .include_text(true)
+        .build();
+    delegated_recall.act_as = Some(delegated);
+    let delegated_hits = poll_recall_until(h.client(), &delegated_recall, |hits| {
+        hits.iter().any(|m| m.memory_id == mem) || any_text_contains(hits, &marker)
+    })
+    .await?;
+
+    // The connection's OWN identity (act_as = None) must NOT — proving the
+    // write landed in the delegated space, not the committing connection's.
+    let own_hits = h.recall(&marker, 50).await?.memories;
+    h.close().await?;
+
+    let delegated_sees = delegated_hits.iter().any(|m| m.memory_id == mem)
+        || any_text_contains(&delegated_hits, &marker);
+    if !delegated_sees {
+        return Ok(ScenarioOutcome::fail(
+            NAME,
+            "delegated identity did not see the txn-committed memory",
+        ));
+    }
+    let own_sees =
+        own_hits.iter().any(|m| m.memory_id == mem) || any_text_contains(&own_hits, &marker);
+    if own_sees {
+        return Ok(ScenarioOutcome::fail(
+            NAME,
+            "the committing connection's own identity saw the delegated txn write",
+        ));
+    }
+    Ok(ScenarioOutcome::pass(
+        NAME,
+        "delegated txn write reachable by the tenant, invisible to the connection identity",
+    ))
+}
+
 /// Run the core black-box scenarios against `endpoint`.
 pub async fn run_core_scenarios(endpoint: SocketAddr) -> Vec<ScenarioOutcome> {
     vec![
         multi_space_isolation(endpoint).await,
+        plan_reason_isolation(endpoint).await,
         encode_recall_forget(endpoint).await,
         txn_read_your_writes(endpoint).await,
+        delegated_txn(endpoint).await,
+    ]
+}
+
+/// Run the operator-admin acceptance scenarios ("E7") — the audit log,
+/// derived-index rebuild, and metrics-family completeness. These drive the
+/// admin HTTP plane (audit / rebuild) and the `/metrics` endpoint in addition
+/// to the wire path, so they read the admin secret + ports from the
+/// environment (`BRAIN_EVAL_ADMIN_*`, `BRAIN_EVAL_METRICS_PORT`).
+pub async fn run_admin_scenarios(endpoint: SocketAddr) -> Vec<ScenarioOutcome> {
+    vec![
+        audit_derivation_logged(endpoint).await,
+        index_rebuild(endpoint).await,
+        resumable_backfill(endpoint).await,
+        metrics_families_present(endpoint).await,
     ]
 }
 
 /// Lowercase hex of a 16-byte id — a unique, collision-free marker suffix.
+/// MEMORY_LIST page size. The server validates this to `1..=100`.
+pub(crate) const MEMORY_LIST_PAGE: u32 = 100;
+
+/// Ids of the ACTIVE memories whose text contains `marker`, read straight
+/// off the durable rows via MEMORY_LIST.
+///
+/// Durability scenarios must not ask RECALL whether a write survived. An
+/// ENCODE ack means the record is on disk; being *retrievable* additionally
+/// needs the async derivation (extraction, statement embedding, the lexical
+/// index) that a restart or a SIGKILL is precisely what interrupts. Counting
+/// hits from RECALL therefore reports a durable row as lost and fails a
+/// healthy server — it did, twice: once in the chaos scenario ("17/18 ACKed
+/// writes survived") and once in restart recovery ("recovered 24/25
+/// memories"). MEMORY_LIST walks the tenant timeline with no query, no
+/// ranking and no derivation, which is the WAL-before-ack claim these
+/// scenarios actually make.
+///
+/// Both scenarios mint a fresh space per run, so enumerating the space is
+/// exact. Tombstoned rows are enumerated but excluded: a row that came back
+/// as a tombstone is not a survivor.
+pub(crate) async fn durable_active_memory_ids(
+    client: &BrainClient,
+    marker: &str,
+) -> Result<std::collections::HashSet<u128>, String> {
+    use brain_db_sdk::wire::types::{
+        MemoryListDirWire, MemoryListRequest, MemoryListSortWire, MemoryListTimeAxisWire,
+    };
+    let mut present = std::collections::HashSet::new();
+    let mut cursor: Vec<u8> = Vec::new();
+    loop {
+        let req = MemoryListRequest {
+            sort: MemoryListSortWire::Created,
+            dir: MemoryListDirWire::Asc,
+            limit: MEMORY_LIST_PAGE,
+            cursor: cursor.clone(),
+            kinds: Vec::new(),
+            include_tombstoned: true,
+            time_axis: MemoryListTimeAxisWire::Created,
+            from_unix_nanos: 0,
+            to_unix_nanos: 0,
+            salience_min: 0.0,
+            salience_max: 1.0,
+            text_contains: String::new(),
+            act_as: None,
+        };
+        let frames = client
+            .memory_list_frames(&req)
+            .await
+            .map_err(|e| e.to_string())?;
+        let (mut last_cursor, mut done) = (Vec::new(), true);
+        for frame in &frames {
+            for item in &frame.items {
+                // state 0 = active.
+                if item.state == 0 && item.text.contains(marker) {
+                    present.insert(u128::from_be_bytes(item.memory_id));
+                }
+            }
+            last_cursor = frame.next_cursor.clone();
+            done = frame.is_final;
+        }
+        if done || last_cursor.is_empty() {
+            break;
+        }
+        cursor = last_cursor;
+    }
+    Ok(present)
+}
+
 fn hex16(id: [u8; 16]) -> String {
     let mut s = String::with_capacity(32);
     for b in id {

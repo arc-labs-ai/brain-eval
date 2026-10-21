@@ -40,6 +40,19 @@ impl Reporter for TextReporter {
             report.meta.judge_temperature,
         )?;
         writeln!(f, "instances   : {}", report.meta.instance_count)?;
+        // Latency below was measured under this much concurrent load, so
+        // say so next to the methodology rather than leaving a reader to
+        // assume a quiet server.
+        writeln!(
+            f,
+            "concurrency : {}{}",
+            report.meta.concurrency,
+            if report.meta.concurrency > 1 {
+                "  (latency measured under concurrent load)"
+            } else {
+                "  (sequential)"
+            }
+        )?;
         writeln!(f, "brain       : {}", report.meta.brain_version)?;
         writeln!(f)?;
 

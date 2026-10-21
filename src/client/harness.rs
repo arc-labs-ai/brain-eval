@@ -21,7 +21,9 @@
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
-use brain_db_sdk::wire::types::{AnswerKindWire, MemoryResult, WireMemoryId, WireUuid};
+use brain_db_sdk::wire::types::{
+    AnswerKindWire, MemoryResult, RecallScopeWire, WireMemoryId, WireUuid,
+};
 use brain_db_sdk::{Auth, BrainClient, BrainError, ClientConfig, EncodeBuilder, RecallBuilder};
 
 use crate::bench::core::instance::TurnRecord;
@@ -194,10 +196,26 @@ impl BrainEvalHarness {
     /// the returned set size — not a ranking knob; the answer's shape
     /// comes from the stored data, never from this count.
     pub async fn recall(&self, cue: &str, max_results: u32) -> Result<RecallOutcome, HarnessError> {
+        self.recall_scoped(cue, max_results, RecallScopeWire::Space)
+            .await
+    }
+
+    /// Run a RECALL at an explicit [`RecallScopeWire`]. `Space` (the default via
+    /// [`Self::recall`]) searches this harness's own space; `Namespace` fans
+    /// out across every space in the caller's namespace (never crossing
+    /// namespaces). The namespace-wide eval scenario uses this to compare the
+    /// two read scopes over one persona split across spaces.
+    pub async fn recall_scoped(
+        &self,
+        cue: &str,
+        max_results: u32,
+        scope: RecallScopeWire,
+    ) -> Result<RecallOutcome, HarnessError> {
         let start = Instant::now();
         let request = RecallBuilder::new(cue)
             .max_results(max_results)
             .include_text(true)
+            .scope(scope)
             .build();
         let answer = self.client.recall(&request).await?;
         let latency_ms = elapsed_ms(start);

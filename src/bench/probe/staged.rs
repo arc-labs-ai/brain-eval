@@ -157,7 +157,7 @@ pub async fn run_staged(
             // measuring the system and measuring a race.
             if let Some(addr) = metrics_addr {
                 println!("  draining write pipeline (waiting for all stages to settle)…");
-                crate::bench::runner::wait_for_write_flush(addr, conv.as_str()).await;
+                crate::client::drain::wait_for_write_flush(addr, conv.as_str()).await;
             }
 
             let yld = drain_and_count(&harness, &turn_texts).await?;
@@ -560,7 +560,11 @@ impl ReadRollup {
         match r.verdict {
             Verdict::Correct => self.correct += 1,
             Verdict::Partial => self.partial += 1,
-            Verdict::Incorrect => {}
+            // Incorrect scores zero; NotJudged was never graded. Neither adds
+            // to a bucket — and the staged probe always judges, so NotJudged
+            // reaching here would mean the probe was run in a mode it does
+            // not support.
+            Verdict::Incorrect | Verdict::NotJudged => {}
         }
         match r.fail_stage {
             Some(s) if s.contains("abstention") => self.fail_abstention += 1,

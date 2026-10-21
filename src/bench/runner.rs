@@ -26,7 +26,7 @@ use crate::bench::core::instance::{EvalInstance, QuestionType};
 use crate::bench::core::outcome::{AnswerKind, JudgeResult, QuestionResult, Verdict};
 use crate::bench::report::baselines::CompetitorBaselines;
 use crate::bench::report::format::{
-    json::JsonReporter, run_json::JsonRunReporter, text::TextReporter, Reporter,
+    html::HtmlReporter, json::JsonReporter, run_json::JsonRunReporter, text::TextReporter, Reporter,
 };
 use crate::bench::report::run_report::{
     ConversationWrite, DrainBarrierStats, ExtractionHealth, FailStage, FailureAttribution,
@@ -38,6 +38,7 @@ use crate::bench::score::metrics::compute_full_metrics;
 use crate::bench::space_manifest::SpaceManifest;
 use crate::bench::synthesize::synthesize_answer;
 use crate::client::auth::KeyMinter;
+use crate::client::drain::wait_for_write_flush;
 use crate::client::harness::{BrainEvalHarness, HarnessError, RecallOutcome};
 use crate::client::metrics::PrometheusMetrics;
 use brain_db_sdk::wire::types::{
@@ -197,7 +198,8 @@ impl EvalRunner {
             benchmark.url(),
             &judge_type,
             instances.len(),
-        );
+        )
+        .with_concurrency(self.config.concurrency.max(1));
 
         // Group by conversation_id so we ingest once per conversation.
         // BTreeMap keeps deterministic ordering.
@@ -219,6 +221,22 @@ impl EvalRunner {
         // and server-wide, so the last conversation's plateau is the most
         // complete snapshot for the run.
         let mut last_drain: Option<DrainBarrierStats> = None;
+
+        // What phase 1 (connect + ingest) hands to phase 2 (read back and
+        // judge). The connection is deliberately NOT carried: phase 2
+        // reconnects on the cached token, so a run of N conversations never
+        // holds N sockets at once.
+        struct Prepared {
+            conv_key: String,
+            idxs: Vec<usize>,
+            space_id: [u8; 16],
+            cw: ConvWrite,
+        }
+        let mut prepared: Vec<Prepared> = Vec::with_capacity(groups.len());
+        // Whether any conversation actually wrote. A read-only run ingests
+        // nothing, so there is nothing to wait for and the barrier is
+        // skipped entirely rather than waiting out its floor for no reason.
+        let mut ingested_any = false;
 
         // Incremental tracking: append each result to a JSONL sidecar and
         // print a running tally as we go, so an interrupted or crashed run
@@ -302,21 +320,183 @@ impl EvalRunner {
             Some(SocketAddr::new(self.config.endpoint.ip(), admin_port))
         };
 
+        // ---- phase 0: resolve each conversation's space + token ----
+        //
+        // Minting is an admin-plane round-trip and it mutates the shared
+        // token cache, so it happens once, serially, before any concurrent
+        // work. That leaves the concurrent phase with nothing shared to
+        // contend on and makes phase 2's reconnect a pure cache hit.
+        struct Planned {
+            conv_key: String,
+            idxs: Vec<usize>,
+            /// `None` when this conversation cannot be run at all (read-only
+            /// with no recorded space, or minting failed); `reason` says why.
+            space: Option<([u8; 16], String)>,
+            reason: String,
+        }
+        let mut planned: Vec<Planned> = Vec::with_capacity(groups.len());
         for (conv_key, idxs) in &groups {
-            // Establish the harness and decide whether to ingest. Read-only
-            // reconnects to the recorded space and skips ingest entirely;
-            // otherwise mint a fresh space, ingest once, and (if persisting)
-            // record the space for future read-only reuse.
-            let (harness, cw): (BrainEvalHarness, ConvWrite) = if let Some(manifest) = &read_only {
-                let Some(space) = manifest.space_for(conv_key) else {
+            let (space_id, why) = if let Some(manifest) = &read_only {
+                match manifest.space_for(conv_key) {
+                    Some(space) => (Some(space), String::new()),
+                    None => {
+                        warn!(
+                            conversation = %conv_key,
+                            "read-only: no space recorded for this conversation; recording its questions as failed",
+                        );
+                        (
+                            None,
+                            "read-only: no persisted space for conversation".to_owned(),
+                        )
+                    }
+                }
+            } else {
+                (Some(brain_db_sdk::new_id()), String::new())
+            };
+
+            let space = match space_id {
+                None => None,
+                Some(id) => match mint_or_cached(&minter, &mut tokens, id).await {
+                    Ok(token) => {
+                        // Record the space so a later read-only run can reuse it.
+                        if read_only.is_none() {
+                            if let Some(pp) = persist.as_mut() {
+                                pp.record(conv_key, id);
+                            }
+                        }
+                        Some((id, token))
+                    }
+                    Err(e) => {
+                        warn!(conversation = %conv_key, error = %e, "key mint failed");
+                        None
+                    }
+                },
+            };
+            let reason = if space.is_none() && why.is_empty() {
+                "data-plane key mint failed".to_owned()
+            } else {
+                why
+            };
+            planned.push(Planned {
+                conv_key: conv_key.clone(),
+                idxs: idxs.clone(),
+                space,
+                reason,
+            });
+        }
+
+        // ---- phase 1: connect + ingest, bounded-concurrently ----
+        //
+        // Each conversation writes into its own `SpaceId`, so no ingest can
+        // observe another's data and they may overlap freely. Sessions
+        // WITHIN a conversation stay strictly ordered: they share one space,
+        // and a stateful predicate's "newer value supersedes the older" is
+        // defined by write order — the supersession benchmark exists to
+        // check exactly that, so parallelising there would be measuring a
+        // race instead.
+        struct IngestOutcome {
+            conv_key: String,
+            idxs: Vec<usize>,
+            space_id: Option<[u8; 16]>,
+            cw: ConvWrite,
+            /// Set when the conversation could not be established at all.
+            failure: Option<String>,
+        }
+
+        let ingest_concurrency = self.config.concurrency.max(1);
+        let endpoint = self.config.endpoint;
+        let is_read_only = read_only.is_some();
+
+        // Borrow, don't move: the instance list outlives every phase and is
+        // read again by phase 2 and the report.
+        let instances_ref = &instances;
+        let ingest_futures = planned.into_iter().map(|pl| async move {
+            let Some((space_id, token)) = pl.space else {
+                return IngestOutcome {
+                    conv_key: pl.conv_key,
+                    idxs: pl.idxs,
+                    space_id: None,
+                    cw: ConvWrite::skipped(),
+                    failure: Some(pl.reason),
+                };
+            };
+
+            let harness = match BrainEvalHarness::connect_with_token(endpoint, space_id, token)
+                .await
+            {
+                Ok(h) => h,
+                Err(e) => {
                     warn!(
-                        conversation = %conv_key,
-                        "read-only: no space recorded for this conversation; recording its questions as failed",
+                        conversation = %pl.conv_key,
+                        error = %e,
+                        "harness connect failed; recording every question in this group as failed",
                     );
-                    for &idx in idxs {
+                    return IngestOutcome {
+                        conv_key: pl.conv_key,
+                        idxs: pl.idxs,
+                        space_id: None,
+                        cw: ConvWrite::skipped(),
+                        failure: Some(format!("connect failed: {e}")),
+                    };
+                }
+            };
+
+            // A read-only reconnect performed no write: there is nothing to
+            // ingest and nothing for the barrier to wait on.
+            let cw = if is_read_only {
+                ConvWrite::skipped()
+            } else {
+                ConvWrite::from_ingest(ingest_sessions(&harness, &instances_ref[pl.idxs[0]]).await)
+            };
+
+            // Release the socket before phase 2. Phase 2 reconnects on the
+            // cached token, so this costs a handshake rather than an admin
+            // mint — and it keeps a run of N conversations from holding N
+            // sockets at once, which on a 500-question benchmark is the
+            // difference between working and exhausting the client's
+            // file-descriptor limit.
+            if let Err(e) = harness.close().await {
+                warn!(error = %e, "harness close failed; continuing");
+            }
+
+            IngestOutcome {
+                conv_key: pl.conv_key,
+                idxs: pl.idxs,
+                space_id: Some(space_id),
+                cw,
+                failure: None,
+            }
+        });
+
+        use futures::StreamExt as _;
+        let ingest_outcomes: Vec<IngestOutcome> = futures::stream::iter(ingest_futures)
+            .buffer_unordered(ingest_concurrency)
+            .collect()
+            .await;
+
+        // Merge in group order so a failure's questions land where the
+        // benchmark put them, not where the scheduler finished them.
+        let mut ingest_outcomes = ingest_outcomes;
+        ingest_outcomes.sort_by(|a, b| a.conv_key.cmp(&b.conv_key));
+        for o in ingest_outcomes {
+            match (o.space_id, o.failure) {
+                (Some(space_id), None) => {
+                    if !is_read_only {
+                        ingested_any = true;
+                    }
+                    prepared.push(Prepared {
+                        conv_key: o.conv_key,
+                        idxs: o.idxs,
+                        space_id,
+                        cw: o.cw,
+                    });
+                }
+                (_, failure) => {
+                    let reason = failure.unwrap_or_else(|| "conversation unavailable".to_owned());
+                    for &idx in &o.idxs {
                         let r = failed_question_result(
                             &instances[idx],
-                            "read-only: no persisted space for conversation".to_owned(),
+                            reason.clone(),
                             /* ingest_failed = */ true,
                         );
                         record_failed(
@@ -326,175 +506,208 @@ impl EvalRunner {
                             r,
                         );
                     }
-                    continue;
-                };
-                let reconnect = match mint_or_cached(&minter, &mut tokens, space).await {
-                    Ok(token) => {
-                        BrainEvalHarness::connect_with_token(self.config.endpoint, space, token)
-                            .await
-                    }
-                    Err(e) => Err(e),
-                };
-                match reconnect {
-                    Ok(h) => (h, ConvWrite::skipped()),
-                    Err(e) => {
-                        warn!(conversation = %conv_key, error = %e, "read-only: reconnect failed; recording group as failed");
-                        for &idx in idxs {
-                            let r = failed_question_result(
-                                &instances[idx],
-                                format!("read-only reconnect failed: {e}"),
-                                true,
-                            );
-                            record_failed(
-                                &mut tracker,
-                                &mut question_results,
-                                &mut question_records,
-                                r,
-                            );
-                        }
-                        continue;
-                    }
                 }
-            } else {
-                // Fresh space for this conversation: mint its key, connect.
-                let space_id = brain_db_sdk::new_id();
-                let connect = match mint_or_cached(&minter, &mut tokens, space_id).await {
-                    Ok(token) => {
-                        BrainEvalHarness::connect_with_token(self.config.endpoint, space_id, token)
-                            .await
-                    }
-                    Err(e) => Err(e),
+            }
+        }
+
+        // ---- phase 1.5: one drain barrier for the whole run ----
+        //
+        // `brain_worker_pending_work` is a server-wide gauge, so one wait
+        // settles every conversation's writes. The old code asked the same
+        // global question once per conversation and paid the full wait each
+        // time; on a benchmark whose instances carry no conversation id —
+        // where every question becomes its own group — that was one barrier
+        // PER QUESTION.
+        if ingested_any {
+            if let Some(addr) = drain_metrics_addr {
+                last_drain = Some(wait_for_write_flush(addr, "all-conversations").await);
+            }
+        }
+
+        // ---- phase 2: read back and judge, bounded-concurrently ----
+        //
+        // Conversations are independent by construction — each owns a
+        // `SpaceId`, so no read can observe another's data — and every unit
+        // of work here is network-bound: a RECALL round-trip and, under
+        // `live-llm`, a judge call. Run sequentially, a benchmark cost the
+        // SUM of those latencies; overlapped, it costs roughly their
+        // maximum divided by the concurrency.
+        //
+        // `buffer_unordered` caps in-flight work at one number, which is
+        // simultaneously the connection cap, the server-load cap, and the
+        // LLM rate limit. Set `BRAIN_EVAL_CONCURRENCY=1` for strict
+        // sequence.
+        //
+        // Results are returned OWNED and merged by the caller in instance
+        // order, never appended from inside a task: a report whose question
+        // order depended on which recall happened to finish first would
+        // differ run to run, and two runs of the same benchmark have to be
+        // diffable.
+        struct GroupOutcome {
+            conversation_write: Option<ConversationWrite>,
+            /// `(instance index, record, result)`, in this group's order.
+            questions: Vec<(usize, QuestionRecord, QuestionResult)>,
+        }
+
+        let concurrency = self.config.concurrency.max(1);
+        // Only the predicate is needed inside the tasks; capturing the
+        // manifest itself would move it out of the enclosing scope.
+        let ingesting_run = read_only.is_none();
+        let token_for = |space: [u8; 16]| tokens.get(&space).cloned();
+
+        let group_futures = prepared.iter().map(|pre| {
+            let conv_key = pre.conv_key.as_str();
+            let idxs = pre.idxs.as_slice();
+            let space_id = pre.space_id;
+            let cw = pre.cw.clone();
+            let cached = token_for(space_id);
+            let instances = &instances;
+            async move {
+                let mut out = GroupOutcome {
+                    conversation_write: None,
+                    questions: Vec::with_capacity(idxs.len()),
                 };
-                let harness = match connect {
+
+                // Phase 1 cached this space's token, so the reconnect is a
+                // handshake with no admin round-trip. A missing token means
+                // phase 1 never got this far, which is already recorded.
+                let Some(token) = cached else {
+                    for &idx in idxs {
+                        let r = failed_question_result(
+                            &instances[idx],
+                            "read-back: no cached data-plane token".to_owned(),
+                            /* ingest_failed = */ false,
+                        );
+                        out.questions.push((idx, failed_record(r.clone()), r));
+                    }
+                    return out;
+                };
+
+                let harness = match BrainEvalHarness::connect_with_token(
+                    self.config.endpoint,
+                    space_id,
+                    token,
+                )
+                .await
+                {
                     Ok(h) => h,
                     Err(e) => {
                         warn!(
                             conversation = %conv_key,
                             error = %e,
-                            "harness connect failed; recording every question in this group as failed",
+                            "read-back reconnect failed; recording every question in this group as failed",
                         );
                         for &idx in idxs {
-                            let inst = &instances[idx];
                             let r = failed_question_result(
-                                inst,
-                                format!("connect failed: {e}"),
-                                /* ingest_failed = */ true,
+                                &instances[idx],
+                                format!("read-back reconnect failed: {e}"),
+                                false,
                             );
-                            record_failed(
-                                &mut tracker,
-                                &mut question_results,
-                                &mut question_records,
-                                r,
-                            );
+                            out.questions.push((idx, failed_record(r.clone()), r));
                         }
-                        continue;
+                        return out;
                     }
                 };
 
-                // Record the space so a later read-only run can reuse it.
-                if let Some(p) = persist.as_mut() {
-                    p.record(conv_key, harness.space_id());
-                }
-
-                // ---- ingest once ----
-                let first = &instances[idxs[0]];
-                let ingest = ingest_sessions(&harness, first).await;
-
-                // ---- wait for async write-time extraction to drain ----
-                // Brain's extractors (entity / statement / relation) run
-                // asynchronously after ENCODE acks (extraction → statement
-                // embedding). Querying immediately would hit a half-built
-                // graph / empty embeddings, so we block until that whole
-                // async pipeline plateaus before reading — this is the
-                // correct default for measurement. Set BRAIN_EVAL_NO_DRAIN
-                // to a truthy value (1/true/yes/on) to opt out and read
-                // against the live, still-settling graph.
-                let drain = match drain_metrics_addr {
-                    Some(addr) => Some(wait_for_write_flush(addr, conv_key).await),
-                    None => None,
-                };
-                (harness, ConvWrite::from_ingest(ingest, drain))
-            };
-
-            // Ledger the conversation's write (ingesting runs only — a
-            // read-only reconnect performed no write worth recording). The
-            // drain barrier has already settled by here, so the per-memory
-            // extraction capture reads a fully-built graph.
-            if read_only.is_none() {
-                if let Some(d) = cw.drain.clone() {
-                    last_drain = Some(d);
-                }
-                let memory_extractions = if full_trace {
-                    capture_memory_extractions(
-                        harness.client(),
-                        &cw.stored_texts,
-                        &cw.stored_ids,
-                        self.config.max_results,
-                    )
-                    .await
-                } else {
-                    Vec::new()
-                };
-                conversation_writes.push(ConversationWrite {
-                    conversation_id: conv_key.clone(),
-                    space_id: uuid::Uuid::from_bytes(harness.space_id())
-                        .hyphenated()
-                        .to_string(),
-                    write_latency_ms: cw.latency_ms,
-                    attempted: cw.attempted,
-                    stored: cw.stored,
-                    deduplicated: cw.deduplicated,
-                    stored_memory_ids: cw.stored_ids.iter().map(ToString::to_string).collect(),
-                    memory_extractions,
-                    ingest_failed: cw.ingest_failed,
-                });
-            }
-
-            // ---- MEMORY_LIST verification (opt-in) ----
-            // Enumerate the tenant timeline on the SAME authenticated space.
-            // After an ingesting run the drain barrier has settled, so this
-            // cross-checks against what ingest reported storing (`cw.stored`).
-            // In a read-only run there is no ingest count (`cw.stored == 0`),
-            // so it just reports the listed total — the proof that a
-            // persisted, migrated corpus is still fully enumerable.
-            if self.config.verify_memory_list {
-                verify_memory_list(harness.client(), conv_key, cw.stored).await;
-            }
-
-            // ---- per-question retrieval + judging ----
-            // `--verify-memory-list` is a list-only diagnostic: it proves the
-            // tenant timeline is enumerable and skips the (LLM-judged, paid)
-            // per-question pass entirely.
-            if !self.config.verify_memory_list {
-                for &idx in idxs {
-                    let inst = &instances[idx];
-                    let run = self
-                        .run_question(
-                            &harness,
-                            inst,
-                            cw.latency_ms,
-                            cw.attempted,
-                            cw.stored,
-                            cw.deduplicated,
-                            cw.ingest_failed,
-                            full_trace,
+                // Ledger the conversation's write (ingesting runs only — a
+                // read-only reconnect performed no write worth recording).
+                // The drain barrier settled before this phase, so the
+                // per-memory extraction capture reads a fully-built graph.
+                if ingesting_run {
+                    let memory_extractions = if full_trace {
+                        capture_memory_extractions(
+                            harness.client(),
+                            &cw.stored_texts,
+                            &cw.stored_ids,
+                            self.config.max_results,
                         )
-                        .await;
-                    tracker.record(&run.result);
-                    question_records.push(QuestionRecord {
-                        result: run.result.clone(),
-                        retrieved: run.retrieved,
-                        fail_stage: run.fail_stage,
-                        plan_trace: run.plan_trace,
+                        .await
+                    } else {
+                        Vec::new()
+                    };
+                    out.conversation_write = Some(ConversationWrite {
+                        conversation_id: conv_key.to_owned(),
+                        space_id: uuid::Uuid::from_bytes(harness.space_id())
+                            .hyphenated()
+                            .to_string(),
+                        write_latency_ms: cw.latency_ms,
+                        attempted: cw.attempted,
+                        stored: cw.stored,
+                        deduplicated: cw.deduplicated,
+                        stored_memory_ids: cw
+                            .stored_ids
+                            .iter()
+                            .map(ToString::to_string)
+                            .collect(),
+                        memory_extractions,
+                        ingest_failed: cw.ingest_failed,
                     });
-                    question_results.push(run.result);
                 }
-            }
 
-            // ---- close harness (best-effort) ----
-            if let Err(e) = harness.close().await {
-                warn!(error = %e, "harness close failed; continuing");
+                // ---- MEMORY_LIST verification (opt-in) ----
+                if self.config.verify_memory_list {
+                    verify_memory_list(harness.client(), conv_key, cw.stored).await;
+                }
+
+                // ---- per-question retrieval + judging ----
+                // `--verify-memory-list` is a list-only diagnostic: it
+                // proves the tenant timeline is enumerable and skips the
+                // (LLM-judged, paid) per-question pass entirely.
+                if !self.config.verify_memory_list {
+                    for &idx in idxs {
+                        let run = self
+                            .run_question(
+                                &harness,
+                                &instances[idx],
+                                cw.latency_ms,
+                                cw.attempted,
+                                cw.stored,
+                                cw.deduplicated,
+                                cw.ingest_failed,
+                                full_trace,
+                            )
+                            .await;
+                        out.questions.push((
+                            idx,
+                            QuestionRecord {
+                                result: run.result.clone(),
+                                retrieved: run.retrieved,
+                                fail_stage: run.fail_stage,
+                                plan_trace: run.plan_trace,
+                            },
+                            run.result,
+                        ));
+                    }
+                }
+
+                if let Err(e) = harness.close().await {
+                    warn!(error = %e, "harness close failed; continuing");
+                }
+                out
             }
+        });
+
+        let outcomes: Vec<GroupOutcome> = futures::stream::iter(group_futures)
+            .buffer_unordered(concurrency)
+            .collect()
+            .await;
+
+        // Merge deterministically: conversation order follows `prepared`
+        // (itself `BTreeMap` order), and questions are restored to instance
+        // order regardless of which group finished first.
+        let mut merged: Vec<(usize, QuestionRecord, QuestionResult)> = Vec::new();
+        for o in outcomes {
+            if let Some(cwrite) = o.conversation_write {
+                conversation_writes.push(cwrite);
+            }
+            merged.extend(o.questions);
+        }
+        conversation_writes.sort_by(|a, b| a.conversation_id.cmp(&b.conversation_id));
+        restore_instance_order(&mut merged, |(idx, _, _)| *idx);
+        for (_, record, result) in merged {
+            tracker.record(&result);
+            question_records.push(record);
+            question_results.push(result);
         }
 
         // Persist the conversation→space manifest so a later
@@ -598,7 +811,15 @@ impl EvalRunner {
                         .map(RetrievedMemory::from_wire)
                         .collect();
                     let latency = outcome.latency_ms;
-                    let answer = self.synth_answer(instance, &outcome).await;
+                    // Retrieval-only: the ranked list is already captured
+                    // above, and every retrieval metric is computed from it
+                    // plus the ground truth. Synthesis is pure downstream
+                    // cost here, so it does not run.
+                    let answer = if self.config.retrieval_only {
+                        String::new()
+                    } else {
+                        self.synth_answer(instance, &outcome).await
+                    };
                     (answer_kind, retrieved, latency, false, answer)
                 }
                 Err(e) => {
@@ -629,21 +850,39 @@ impl EvalRunner {
         let retrieved_memory_contents: Vec<String> =
             retrieved.iter().map(|m| m.text.clone()).collect();
         let memories_retrieved = retrieved_memory_contents.len();
-        let judged = self.judge_answer(instance, &system_answer).await;
+        // Both judges are LLM calls scoring an ANSWER. In retrieval-only mode
+        // there is no answer, so there is nothing to grade — and a fabricated
+        // verdict would be worse than none: `Incorrect` would read as "the
+        // system got it wrong" in every report that aggregates accuracy.
+        // `NotJudged` keeps that population out of the accuracy denominator.
+        let judged = if self.config.retrieval_only {
+            JudgeResult {
+                question_id: instance.question_id.clone(),
+                verdict: Verdict::NotJudged,
+                score: Verdict::NotJudged.score(),
+                reasoning: "retrieval-only run: no answer synthesised, nothing judged".to_owned(),
+            }
+        } else {
+            self.judge_answer(instance, &system_answer).await
+        };
         // Grade retrieval independently of synthesis: did Brain surface the
         // memory that supports the gold answer? Skip on a retrieval error
         // (nothing meaningful to grade).
-        let (context_supported, context_support_reasoning) = if retrieval_failed {
-            (None, String::new())
-        } else {
-            self.judge_support(instance, &retrieved_memory_contents)
-                .await
-        };
+        let (context_supported, context_support_reasoning) =
+            if retrieval_failed || self.config.retrieval_only {
+                (None, String::new())
+            } else {
+                self.judge_support(instance, &retrieved_memory_contents)
+                    .await
+            };
 
         // Attribute a non-correct answer to the stage that lost it. Skip
         // attribution on an infrastructure retrieval failure — that is not a
         // model/retrieval quality signal.
-        let fail_stage = if retrieval_failed {
+        // Attribution asks "which stage lost this answer?", which presumes an
+        // answer was graded. Without a verdict it cannot be computed, so it is
+        // absent rather than guessed.
+        let fail_stage = if retrieval_failed || self.config.retrieval_only {
             None
         } else {
             FailStage::attribute(
@@ -756,10 +995,12 @@ impl EvalRunner {
             let path = match kind {
                 ReporterKind::Json => self.config.output_dir.join(format!("{stem}.json")),
                 ReporterKind::Text => self.config.output_dir.join(format!("{stem}.txt")),
+                ReporterKind::Html => self.config.output_dir.join(format!("{stem}.html")),
             };
             let result: std::io::Result<()> = match kind {
                 ReporterKind::Json => JsonReporter.write(report, &path),
                 ReporterKind::Text => TextReporter.write(report, &path),
+                ReporterKind::Html => HtmlReporter.write(report, &path),
             };
             if let Err(ref e) = result {
                 warn!(reporter = ?kind, error = %e, "reporter failed");
@@ -787,6 +1028,7 @@ struct QuestionRun {
 
 /// Per-conversation write state threaded from ingest through to the
 /// conversation ledger.
+#[derive(Clone)]
 struct ConvWrite {
     latency_ms: u64,
     attempted: u64,
@@ -795,7 +1037,6 @@ struct ConvWrite {
     ingest_failed: bool,
     stored_ids: Vec<WireMemoryId>,
     stored_texts: Vec<String>,
-    drain: Option<DrainBarrierStats>,
 }
 
 impl ConvWrite {
@@ -809,12 +1050,16 @@ impl ConvWrite {
             ingest_failed: false,
             stored_ids: Vec::new(),
             stored_texts: Vec::new(),
-            drain: None,
         }
     }
 
-    /// Build from an ingest aggregate and the drain plateau (if drained).
-    fn from_ingest(ingest: IngestAggregate, drain: Option<DrainBarrierStats>) -> Self {
+    /// Build from an ingest aggregate.
+    ///
+    /// No drain field: the barrier used to run per conversation and its
+    /// result was carried here, but it reads a SERVER-WIDE gauge, so the
+    /// run now waits once after every ingest and records that single
+    /// result directly on the report.
+    fn from_ingest(ingest: IngestAggregate) -> Self {
         #[allow(clippy::cast_possible_truncation)]
         let stored = ingest.stored_ids.len() as u64;
         Self {
@@ -825,7 +1070,6 @@ impl ConvWrite {
             ingest_failed: ingest.failed,
             stored_ids: ingest.stored_ids,
             stored_texts: ingest.stored_texts,
-            drain,
         }
     }
 }
@@ -833,6 +1077,33 @@ impl ConvWrite {
 /// Record an infrastructure-failed question into all three sinks: the
 /// progress tracker, the summary results, and the run-report records (with
 /// no retrieved memories and no attributable fail stage).
+/// Put concurrently-produced results back into instance order.
+///
+/// `buffer_unordered` yields groups as they finish, so without this the
+/// report's question order would depend on which recall happened to return
+/// first — two runs of the same benchmark would produce different files and
+/// stop being diffable. The instance index is captured before the work is
+/// dispatched, so ordering is restored exactly, independent of scheduling.
+///
+/// Sorting is stable, so questions within one group keep their emitted
+/// order even if two shared an index (they cannot, but the guarantee costs
+/// nothing and makes the function total).
+fn restore_instance_order<T>(merged: &mut [T], index_of: impl Fn(&T) -> usize) {
+    merged.sort_by_key(index_of);
+}
+
+/// The record shape for a question that never produced a reading — the
+/// same empty-trace form `record_failed` writes, hoisted so the concurrent
+/// read-back phase can build one without touching shared accumulators.
+fn failed_record(r: QuestionResult) -> QuestionRecord {
+    QuestionRecord {
+        result: r,
+        retrieved: Vec::new(),
+        fail_stage: None,
+        plan_trace: None,
+    }
+}
+
 fn record_failed(
     tracker: &mut IncrementalTracker,
     results: &mut Vec<QuestionResult>,
@@ -1202,81 +1473,60 @@ fn env_truthy(var: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Block until the server's async write pipeline has fully flushed, so a
-/// conversation's entity / statement / relation graph — and its
-/// embeddings — are reflected in the read indexes before we query it.
-///
-/// A write is two-phase: the synchronous memory record (WAL-acked at
-/// ENCODE) and the asynchronous tail (extraction of entities /
-/// statements / relations, then statement embedding). Grounded recall
-/// depends on that async tail, so reads must not fire until it settles.
-/// We poll the COMBINED progress of both async stages —
-/// `brain_extractor_items_written_total` + `brain_statement_embed_rows_embedded_total`
-/// — and treat a plateau (no increase across a stable window, after at
-/// least one write has landed) as flushed. Watching only extraction
-/// would fire reads while statement embeddings are still being computed.
-/// Best-effort: failed polls keep retrying; the cap just proceeds.
-pub(crate) async fn wait_for_write_flush(
-    metrics_addr: SocketAddr,
-    conv: &str,
-) -> DrainBarrierStats {
-    use std::time::Duration;
-    const INTERVAL: Duration = Duration::from_secs(5);
-    const STABLE_NEEDED: u32 = 12; // 60s plateau — tolerates slow LLM batches
-    const MIN_POLLS: u32 = 6; // ≥30s floor so the workers have started
-    const MAX_POLLS: u32 = 360; // 30 min hard cap
+#[cfg(test)]
+mod ordering_tests {
+    use super::restore_instance_order;
 
-    let mut last: i64 = -1;
-    let mut stable: u32 = 0;
-    let mut last_ex: u64 = 0;
-    let mut last_em: u64 = 0;
-    for i in 0..MAX_POLLS {
-        // A scrape failure (endpoint unreachable) is `None` here and skips
-        // this poll without resetting the plateau — a transient scrape
-        // failure shouldn't be mistaken for the pipeline going backwards.
-        // A successful scrape with the family simply absent (nothing
-        // extracted yet) is `0`, not `None` — `PrometheusMetrics::sum`
-        // returning `None` for an absent family is folded into 0 via
-        // `unwrap_or(0.0)` below, since "connected but no samples yet" and
-        // "not written yet" mean the same thing here.
-        let scraped = PrometheusMetrics::scrape(metrics_addr).await.ok();
-        if let Some(m) = scraped.as_ref() {
-            let ex = m.sum("brain_extractor_items_written_total").unwrap_or(0.0) as i64;
-            let em = m
-                .sum("brain_statement_embed_rows_embedded_total")
-                .unwrap_or(0.0) as i64;
-            last_ex = ex.max(0) as u64;
-            last_em = em.max(0) as u64;
-            let cur = ex + em;
-            if cur == last {
-                stable += 1;
-            } else {
-                stable = 0;
-                last = cur;
-            }
-            // Require some async work to have actually landed (`cur > 0`)
-            // before honoring a plateau, so we don't mistake "workers
-            // haven't picked up yet" for "flushed".
-            if i + 1 >= MIN_POLLS && cur > 0 && stable >= STABLE_NEEDED {
-                tracing::info!(
-                    conversation = %conv,
-                    extracted = ex,
-                    statement_rows_embedded = em,
-                    "async write pipeline flushed"
-                );
-                return DrainBarrierStats {
-                    extractor_items_written: last_ex,
-                    statement_rows_embedded: last_em,
-                    flushed: true,
-                };
-            }
-        }
-        tokio::time::sleep(INTERVAL).await;
+    /// The determinism guarantee behind running conversations concurrently.
+    ///
+    /// `buffer_unordered` yields whichever group finishes first, so results
+    /// arrive shuffled. If the report simply appended them, two runs of the
+    /// same benchmark would order their questions differently and stop
+    /// being diffable — the comparison a benchmark exists for.
+    #[test]
+    fn completion_order_does_not_survive_into_the_report() {
+        // Groups finished 3rd, 1st, 2nd.
+        let mut merged = vec![(7usize, "h"), (0, "a"), (3, "d")];
+        restore_instance_order(&mut merged, |(i, _)| *i);
+        assert_eq!(merged, vec![(0, "a"), (3, "d"), (7, "h")]);
     }
-    warn!(conversation = %conv, "write-flush wait hit max; proceeding");
-    DrainBarrierStats {
-        extractor_items_written: last_ex,
-        statement_rows_embedded: last_em,
-        flushed: false,
+
+    #[test]
+    fn any_completion_permutation_yields_the_same_order() {
+        let canonical: Vec<(usize, u32)> = (0..8).map(|i| (i, i as u32 * 10)).collect();
+        // Every rotation stands in for a different scheduling outcome.
+        for rot in 0..canonical.len() {
+            let mut shuffled = canonical.clone();
+            shuffled.rotate_left(rot);
+            restore_instance_order(&mut shuffled, |(i, _)| *i);
+            assert_eq!(shuffled, canonical, "rotation {rot} must normalise");
+        }
+    }
+
+    #[test]
+    fn an_empty_run_is_not_a_special_case() {
+        let mut merged: Vec<(usize, ())> = Vec::new();
+        restore_instance_order(&mut merged, |(i, _)| *i);
+        assert!(merged.is_empty());
+    }
+
+    #[test]
+    fn ordering_is_by_instance_index_not_by_group() {
+        // Two conversations interleave in instance order: a report grouped
+        // by conversation would read 0,2,4,1,3,5 and silently reorder the
+        // benchmark's own question sequence.
+        let mut merged = vec![
+            (1usize, "convB-q0"),
+            (3, "convB-q1"),
+            (5, "convB-q2"),
+            (0, "convA-q0"),
+            (2, "convA-q1"),
+            (4, "convA-q2"),
+        ];
+        restore_instance_order(&mut merged, |(i, _)| *i);
+        assert_eq!(
+            merged.iter().map(|(i, _)| *i).collect::<Vec<_>>(),
+            vec![0, 1, 2, 3, 4, 5]
+        );
     }
 }

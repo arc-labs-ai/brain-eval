@@ -17,7 +17,12 @@ pub enum ReporterKind {
     Json,
     /// ASCII-table text summary.
     Text,
+    /// Self-contained HTML page (all CSS inlined, no external requests).
+    Html,
 }
+
+/// Opt into retrieval-only runs. See [`RunConfig::retrieval_only`].
+const ENV_RETRIEVAL_ONLY: &str = "BRAIN_EVAL_RETRIEVAL_ONLY";
 
 /// Runtime configuration for [`crate::bench::EvalRunner::run`].
 #[derive(Debug, Clone)]
@@ -64,6 +69,29 @@ pub struct RunConfig {
     /// Admin listener port on the endpoint host. `BRAIN_EVAL_ADMIN_PORT`,
     /// default `9092`.
     pub admin_port: u16,
+    /// RETRIEVAL-ONLY: skip answer synthesis and both judges.
+    ///
+    /// The only accuracy number this harness produces today is end-to-end —
+    /// retrieval PLUS a synthesiser PLUS a judge. Three runs over identically
+    /// ingested data scored 0.628 / 0.648 / 0.673: a 4.5-point spread with the
+    /// inputs held constant. That is the noise floor, and it is wider than
+    /// most retrieval changes worth making would produce, so a real 2-point
+    /// gain is indistinguishable from judge jitter.
+    ///
+    /// Every retrieval metric — recall@K, NDCG@K, MRR — is computed from the
+    /// ranked memory list and the ground truth alone. None of them needs an
+    /// LLM. This flag drops the three per-question model calls, which is what
+    /// turns a run that costs money and minutes into one that costs neither
+    /// and can be repeated until the variance is understood.
+    ///
+    /// What it does NOT do is change retrieval: the same RECALL, the same
+    /// ranking, the same captured memories. Only the scoring downstream of
+    /// them is skipped. `accuracy` and the fail-stage attribution are
+    /// meaningless in this mode and are reported as absent rather than as
+    /// zero — a zero would read as "everything was wrong".
+    ///
+    /// `BRAIN_EVAL_RETRIEVAL_ONLY=1`.
+    pub retrieval_only: bool,
     /// When set, restrict the run to instances whose `conversation_id`
     /// equals this value (applied before grouping, so only that
     /// conversation's haystack is ingested). `None` runs every
@@ -74,26 +102,86 @@ pub struct RunConfig {
     /// authenticated space, print a summary, and assert the listed count is
     /// > 0. `BRAIN_EVAL_VERIFY_MEMORY_LIST`.
     pub verify_memory_list: bool,
+    /// How many conversations the runner drives at once.
+    ///
+    /// Conversations are independent by construction — each gets its own
+    /// `SpaceId`, so their ingests and recalls cannot observe one another.
+    /// The runner was nonetheless strictly sequential, which made a run cost
+    /// the SUM of every conversation's server round-trips, LLM judge calls,
+    /// and extraction-drain wait rather than their overlap.
+    ///
+    /// `1` reproduces the old strictly-sequential behaviour exactly, and is
+    /// the escape hatch when a server is too small to take the load or a run
+    /// has to be bisected. Higher values bound in-flight work: connections,
+    /// concurrent server requests, and concurrent judge calls are all capped
+    /// by this one number, so it is also the LLM rate-limit control.
+    ///
+    /// `BRAIN_EVAL_CONCURRENCY`.
+    pub concurrency: usize,
+}
+
+/// Conversations in flight when nothing is configured.
+///
+/// Chosen to overlap latency without becoming a load test of the server the
+/// eval is supposed to be measuring: a benchmark that saturates the box
+/// reports its own queueing delay as Brain's latency. Raise it for a
+/// dedicated host; set `1` to go back to strict sequence.
+pub const DEFAULT_CONCURRENCY: usize = 8;
+
+/// Clamp a configured concurrency into the usable range.
+///
+/// `0` is meaningless (no work would ever run) and is treated as "unset" →
+/// the default, rather than hanging or silently doing nothing.
+#[must_use]
+pub fn normalize_concurrency(requested: usize) -> usize {
+    if requested == 0 {
+        DEFAULT_CONCURRENCY
+    } else {
+        requested
+    }
 }
 
 impl RunConfig {
     /// Sensible defaults for the given endpoint.
+    ///
+    /// The admin plane (`admin_secret` / `admin_port`) is read from the
+    /// environment (`BRAIN_EVAL_ADMIN_SECRET`, `BRAIN_EVAL_ADMIN_PORT`)
+    /// exactly as [`RunConfig::from_env`] and
+    /// [`KeyMinter::from_external_env`](crate::client::auth::KeyMinter::from_external_env)
+    /// do: `default_for` is the "attach to an already-running external
+    /// server" constructor, and for such a server the admin credentials are
+    /// inherently environmental — the eval did not boot it, so it cannot know
+    /// the secret any other way. Callers that own the boot (docker harness)
+    /// set the fields explicitly afterward.
     #[must_use]
     pub fn default_for(endpoint: SocketAddr) -> Self {
+        let admin_secret = std::env::var(ENV_ADMIN_SECRET)
+            .ok()
+            .filter(|s| !s.is_empty())
+            .map(Secret::new);
+        let admin_port = std::env::var(ENV_ADMIN_PORT)
+            .ok()
+            .and_then(|p| p.parse::<u16>().ok())
+            .unwrap_or(DEFAULT_ADMIN_PORT);
+
         Self {
             endpoint,
             max_questions: None,
             max_results: 50,
+            retrieval_only: std::env::var(ENV_RETRIEVAL_ONLY)
+                .ok()
+                .is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true")),
             output_dir: PathBuf::from("target/eval-reports"),
-            reporters: vec![ReporterKind::Json, ReporterKind::Text],
+            reporters: vec![ReporterKind::Json, ReporterKind::Text, ReporterKind::Html],
             question_types: None,
             persist_spaces: None,
             read_only_spaces: None,
             namespace: DEFAULT_NAMESPACE.to_string(),
-            admin_secret: None,
-            admin_port: DEFAULT_ADMIN_PORT,
+            admin_secret,
+            admin_port,
             only_conversation: None,
             verify_memory_list: false,
+            concurrency: DEFAULT_CONCURRENCY,
         }
     }
 
@@ -136,17 +224,18 @@ impl RunConfig {
             .unwrap_or_else(|_| "target/eval-reports".to_owned());
 
         let formats_str =
-            std::env::var("BRAIN_EVAL_FORMATS").unwrap_or_else(|_| "json,text".to_owned());
+            std::env::var("BRAIN_EVAL_FORMATS").unwrap_or_else(|_| "json,text,html".to_owned());
         let reporters: Vec<ReporterKind> = formats_str
             .split(',')
             .filter_map(|s| match s.trim().to_ascii_lowercase().as_str() {
                 "json" => Some(ReporterKind::Json),
                 "text" | "txt" => Some(ReporterKind::Text),
+                "html" => Some(ReporterKind::Html),
                 _ => None,
             })
             .collect();
         let reporters = if reporters.is_empty() {
-            vec![ReporterKind::Json, ReporterKind::Text]
+            vec![ReporterKind::Json, ReporterKind::Text, ReporterKind::Html]
         } else {
             reporters
         };
@@ -192,11 +281,23 @@ impl RunConfig {
                 .as_str(),
             "1" | "true" | "yes" | "on"
         );
+        // An unparseable value falls back to the default rather than
+        // failing the run: a typo in a throughput knob must not stop an
+        // eval, and the effective value is reported in the run meta.
+        let concurrency = normalize_concurrency(
+            std::env::var("BRAIN_EVAL_CONCURRENCY")
+                .ok()
+                .and_then(|v| v.trim().parse::<usize>().ok())
+                .unwrap_or(DEFAULT_CONCURRENCY),
+        );
 
         Ok(Self {
             endpoint,
             max_questions,
             max_results,
+            retrieval_only: std::env::var(ENV_RETRIEVAL_ONLY)
+                .ok()
+                .is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true")),
             output_dir: PathBuf::from(output_dir),
             reporters,
             question_types,
@@ -207,6 +308,7 @@ impl RunConfig {
             admin_port,
             only_conversation,
             verify_memory_list,
+            concurrency,
         })
     }
 
@@ -214,6 +316,14 @@ impl RunConfig {
     #[must_use]
     pub fn with_endpoint(mut self, ep: SocketAddr) -> Self {
         self.endpoint = ep;
+        self
+    }
+
+    /// Override how many conversations run at once. `0` means "use the
+    /// default"; `1` is strict sequence.
+    #[must_use]
+    pub fn with_concurrency(mut self, n: usize) -> Self {
+        self.concurrency = normalize_concurrency(n);
         self
     }
 

@@ -21,12 +21,11 @@
 //! Owns its server lifecycle and cleans up the volume on exit. `opts` must
 //! carry a unique container name / ports / `data_volume`.
 
-use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::time::Duration;
 
 use brain_db_sdk::wire::types::EncodeRequest;
-use brain_db_sdk::{new_id, Auth, BrainClient, ClientConfig, RecallBuilder};
+use brain_db_sdk::{new_id, Auth, BrainClient, ClientConfig};
 
 use super::ScenarioOutcome;
 use crate::client::server::{remove_volume, DockerServerOpts, ServerHandle};
@@ -39,8 +38,9 @@ const CYCLES: usize = 2;
 const KILL_DELAY: Duration = Duration::from_millis(1500);
 /// Settle time for docker to release the port mapping between boots.
 const SETTLE: Duration = Duration::from_secs(1);
-/// Cap on ACKs collected per cycle, so on fast hardware the total stays well
-/// under `MAX_RECALL_TOP_K` (1000) for the single-RECALL survivor count.
+/// Cap on ACKs collected per cycle, so a fast machine does not spend the
+/// whole kill window writing. The survivor count pages through MEMORY_LIST,
+/// so this is no longer bounded by a RECALL top-k.
 const MAX_BATCH: usize = 200;
 
 /// SIGKILL the server mid-write across `CYCLES` cycles; every ACKed write
@@ -188,7 +188,11 @@ async fn write_until_dead(
     acked
 }
 
-/// Count how many of `acked` resurface in a single RECALL on the marker.
+/// Count how many of `acked` are still in the durable store after restart.
+///
+/// Reads MEMORY_LIST rather than RECALL — see
+/// [`super::durable_active_memory_ids`] for why that distinction is the whole
+/// point of this scenario.
 async fn count_survivors(
     endpoint: SocketAddr,
     token: &str,
@@ -198,18 +202,8 @@ async fn count_survivors(
     let client = BrainClient::connect_with(endpoint, client_config(token))
         .await
         .map_err(|e| e.to_string())?;
-    let k = (acked.len() * 2).clamp(10, 1000) as u32;
-    let req = RecallBuilder::new(marker)
-        .max_results(k)
-        .include_text(false)
-        .build();
-    let hits = client
-        .recall(&req)
-        .await
-        .map_err(|e| e.to_string())?
-        .memories;
-    let ids: HashSet<u128> = hits.iter().map(|m| m.memory_id).collect();
-    let survived = acked.iter().filter(|(id, _)| ids.contains(id)).count();
+    let present = super::durable_active_memory_ids(&client, marker).await?;
+    let survived = acked.iter().filter(|(id, _)| present.contains(id)).count();
     let _ = client.close().await;
     Ok(survived)
 }

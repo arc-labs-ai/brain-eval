@@ -421,16 +421,11 @@ impl ExtractionHealth {
 
 /// The drain-barrier plateau — what the async write pipeline had produced
 /// when reads were allowed to start.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct DrainBarrierStats {
-    /// `brain_extractor_items_written_total` at the plateau (all item kinds).
-    pub extractor_items_written: u64,
-    /// `brain_statement_embed_rows_embedded_total` at the plateau.
-    pub statement_rows_embedded: u64,
-    /// `true` if the plateau was reached; `false` if the wait hit its cap
-    /// (or never scraped) and proceeded anyway.
-    pub flushed: bool,
-}
+///
+/// Defined alongside the barrier that produces it in
+/// [`crate::client::drain`], and re-exported here because this module
+/// serialises it into the run report.
+pub use crate::client::drain::DrainBarrierStats;
 
 // ---------------------------------------------------------------------------
 // Read side

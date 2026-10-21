@@ -7,6 +7,19 @@ license = "Apache-2.0"
 repository = "https://github.com/arc-labs-ai/brain-eval"
 description = "Evaluation, benchmarking, and report generation for Brain — the cognitive substrate for AI agents."
 
+# NOT PUBLISHED. This is an internal evaluation harness, not a library anyone
+# consumes: it drives a running brain-server, loads benchmark datasets and
+# writes reports. Publishing it would put the whole bench rig — dataset
+# loaders, blackbox/scale suites, scorers, reporters — on a public registry for
+# no one's benefit, and crates.io names cannot be reused once taken.
+#
+# `publish = false` makes `cargo publish` refuse outright, so this does not
+# depend on a workflow being absent or a secret being unset. It previously did:
+# the release workflow published on any `v*` tag, and the only thing stopping
+# it was that RELEASE_PLEASE_TOKEN was missing, so release-please's tag never
+# fired it. That is an accident holding a door shut, not a decision.
+publish = false
+
 [features]
 default = []
 # Enables LLM-as-judge + LLM answer synthesis. Off by default — real LLM
@@ -26,25 +39,24 @@ live-llm = []
 # eval rig decoupled from substrate internals — the whole point of the
 # repo split.
 #
-# We depend on the PUBLISHED crate (`brain-db-sdk = "0.1"`); the
-# `[patch.crates-io]` at the bottom redirects to the sibling `brain-sdk`
-# checkout for local co-development, so this repo builds standalone (from
-# crates.io, once published) and in the side-by-side layout (from the
-# path) without edits. Same pattern brain-shell uses.
+# We depend on the PUBLISHED crate from crates.io, with no
+# `[patch.crates-io]` override: brain-db-sdk 0.2.0 is published, so this
+# repo builds standalone from a bare clone with no sibling checkout
+# required. brain-eval's only SDK-family dependency is brain-db-sdk itself
+# (no brain-edge), so there is no second consumer whose resolution would
+# need unifying — nothing here needs a patch, and a patch would only risk
+# silently diverging from what CI and consumers actually build.
 #
-# STATUS (checked against the crates.io API — a GET on
-# /api/v1/crates/brain-db-sdk currently 404s): brain-db-sdk is NOT yet
-# published. The only way this repo builds today is via the
-# `[patch.crates-io]` sibling checkout below — CI's `check` job always
-# checks out `../brain-sdk` for exactly this reason, so the "pure
-# crates.io" path is untested and will fail for anyone who clones this
-# repo alone without the sibling checkout. Once brain-sdk publishes 0.1.0,
-# drop this note; until then, treat the `[patch]` block as load-bearing,
-# not optional.
+# To test an unreleased SDK change locally, add a `[patch.crates-io]`
+# entry pointing at `../brain-sdk/rust` *and* make sure the version
+# requirement below is satisfiable by that checkout's version — a patch
+# whose version cannot satisfy the requirement is silently ignored by
+# Cargo (it only warns "patch ... was not used in the crate graph") and
+# the registry copy is used instead. Revert both before committing.
 # ----------------------------------------------------------------------------
 
 [dependencies]
-brain-db-sdk = "0.1"
+brain-db-sdk = "0.2"
 
 tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "macros", "signal", "time", "sync", "process"] }
 serde = { version = "1", features = ["derive"] }
@@ -64,6 +76,14 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # behind live-llm) and tiny.
 sha2 = "0.10"
 
+# Bounded concurrency for the runner. Conversations and their questions are
+# independent (each conversation owns a `SpaceId`), and the work is
+# network-bound — server round-trips and LLM judge calls — so overlapping
+# them is the difference between a run costing the SUM of its latencies and
+# costing their maximum. `buffer_unordered` gives that with a hard cap on
+# in-flight work, which doubles as the server-load and LLM rate limit.
+futures = { version = "0.3", default-features = false, features = ["std", "async-await"] }
+
 # HTTP client. Core dependency: the runner uses it for the admin
 # `/metrics` extraction-drain barrier (independent of LLM), and the
 # `live-llm` judge / synthesizer reuse it. rustls (no system OpenSSL);
@@ -75,9 +95,3 @@ reqwest = { version = "0.12", default-features = false, features = [
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "test-util"] }
-
-# Local co-development override: build against the sibling SDK checkout
-# instead of the crates.io release. Remove (or comment out) to force a
-# pure crates.io build, e.g. when validating the published package.
-[patch.crates-io]
-brain-db-sdk = { path = "../brain-sdk/rust" }

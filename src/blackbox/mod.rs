@@ -13,6 +13,7 @@
 //!   for error/recall/latency drift.
 
 pub mod acceptance;
+pub mod namespace_wide;
 pub mod scale;
 pub mod soak;
 pub mod system;

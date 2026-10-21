@@ -47,15 +47,22 @@ use brain_db_sdk::wire::types::{
 };
 use brain_db_sdk::{new_id, Auth, BrainClient, BrainError, ClientConfig, EncodeBuilder};
 
+use super::{Targets, VerbTarget};
 use crate::client::auth::KeyMinter;
 use crate::client::harness::HarnessError;
 
 /// Built-in `Person` entity type id (seeded `brain:` schema).
 const PERSON_TYPE_ID: u32 = 1;
-/// Non-stateful Fact predicate with a `Value<text>` object — cumulative,
-/// so concurrent creates append rather than contending on one supersession
-/// chain (which `brain:current_role`, being stateful, would do).
-const STATEMENT_PREDICATE: &str = "brain:has_name";
+/// Local predicate name for the STATEMENT_CREATE load. Qualified at the use
+/// site with the connection's own namespace (see [`run_one`]) rather than the
+/// `brain:` system namespace: `brain:` is always schema'd and declares only
+/// the five `behavior_*` predicates, so an explicit STATEMENT_CREATE naming
+/// any other `brain:` predicate is (correctly) rejected `PredicateNotInSchema`.
+/// The eval's own namespace is schemaless, so the predicate is coined on the
+/// fly and a `Fact` with a `Value<text>` object is cumulative — concurrent
+/// creates append rather than contending on one supersession chain (which a
+/// stateful kind would do).
+const STATEMENT_PREDICATE_NAME: &str = "has_name";
 /// Seeded symmetric many-to-many relation type.
 const RELATION_TYPE: &str = "brain:related_to";
 /// Per-request deadline for the load connections — generous, so a slow op
@@ -88,18 +95,37 @@ impl TputVerb {
         }
     }
 
-    /// Per-shard sustained ops/s floor. ENCODE is the spec §19/02
-    /// Throughput floor (ENCODE ≥ 5000). The typed-graph write verbs carry
-    /// no spec *throughput* floor (only latency targets), so their floors
-    /// here are conservative informational placeholders — the perf gate is
+    /// Per-shard sustained ops/s floor.
+    ///
+    /// ENCODE (≥ 5000) and STATEMENT_CREATE (≥ 10K/s per shard) are spec
+    /// throughput floors — the §19/02 per-shard ENCODE target and the
+    /// combined-acceptance `STATEMENT_CREATE throughput: ≥ 10K/s per shard`
+    /// row respectively. RELATION_CREATE and ENTITY_RESOLVE carry no spec
+    /// *throughput* floor (they are latency-gated, see
+    /// [`TputVerb::latency_target`]), so the floors here are conservative
+    /// informational values for the perf signal only. The perf gate is
     /// non-binding off reference hardware regardless.
     #[must_use]
     pub fn target_ops_per_sec(self) -> f64 {
         match self {
             TputVerb::Encode => 5_000.0,
-            TputVerb::StatementCreate => 3_000.0,
+            TputVerb::StatementCreate => 10_000.0,
             TputVerb::RelationCreate => 2_000.0,
             TputVerb::EntityResolve => 10_000.0,
+        }
+    }
+
+    /// The spec per-verb latency budget this verb is gated against
+    /// (`spec/19_benchmarks/06_complete_acceptance.md` §Latency, mirrored in
+    /// [`Targets`]). The concurrent probe drives an exact tier-1 resolve, so
+    /// ENTITY_RESOLVE maps to the tiers-1–2 budget.
+    #[must_use]
+    pub fn latency_target(self, targets: &Targets) -> VerbTarget {
+        match self {
+            TputVerb::Encode => targets.encode,
+            TputVerb::StatementCreate => targets.statement_create,
+            TputVerb::RelationCreate => targets.relation_create,
+            TputVerb::EntityResolve => targets.entity_resolve_tier12,
         }
     }
 
@@ -174,6 +200,9 @@ pub struct VerbThroughput {
     pub p99_ms: f64,
     /// Spec / informational ops/s floor for this verb.
     pub target_ops_per_sec: f64,
+    /// Spec per-verb latency budget (`spec/19_benchmarks` §Latency) this
+    /// verb's measured p50/p99 are gated against.
+    pub latency_target: VerbTarget,
 }
 
 impl VerbThroughput {
@@ -181,6 +210,14 @@ impl VerbThroughput {
     #[must_use]
     pub fn meets_floor(&self) -> bool {
         self.ops_per_sec >= self.target_ops_per_sec
+    }
+
+    /// Met its spec per-verb latency budget under load (the latency perf
+    /// verdict; meaningful on ref-HW only). A verb whose spec bounds only
+    /// P50 (`latency_target.p99_ms == INFINITY`) gates on P50 alone.
+    #[must_use]
+    pub fn meets_latency(&self) -> bool {
+        self.latency_target.pass(self.p50_ms, self.p99_ms)
     }
 
     /// No real (non-timeout) errors — the correctness verdict. Must hold on
@@ -394,6 +431,7 @@ async fn measure_verb(
         p50_ms: percentile(&mut lat_ms, 0.50),
         p99_ms: percentile(&mut lat_ms, 0.99),
         target_ops_per_sec: verb.target_ops_per_sec(),
+        latency_target: verb.latency_target(&Targets::default()),
     }
 }
 
@@ -412,6 +450,7 @@ fn verb_setup_failed(verb: TputVerb, clients: usize, e: &BrainError) -> VerbThro
         p50_ms: 0.0,
         p99_ms: 0.0,
         target_ops_per_sec: verb.target_ops_per_sec(),
+        latency_target: verb.latency_target(&Targets::default()),
     }
 }
 
@@ -539,7 +578,7 @@ async fn run_one(client: &BrainClient, plan: &WorkerPlan, seq: u64) -> Result<()
                 session_id: 0,
                 kind: StatementKindWire::Fact,
                 subject: *subject,
-                predicate: STATEMENT_PREDICATE.to_string(),
+                predicate: format!("{}:{STATEMENT_PREDICATE_NAME}", client.namespace()),
                 object: StatementObjectWire::Value(StatementValueWire::Text(format!("name-{seq}"))),
                 confidence: 0.9,
                 evidence: EvidenceRefWire::Inline(Vec::new()),
@@ -654,6 +693,10 @@ mod tests {
             p50_ms: 1.0,
             p99_ms: 2.0,
             target_ops_per_sec: 5.0,
+            latency_target: VerbTarget {
+                p50_ms: 1.0,
+                p99_ms: 5.0,
+            },
         }
     }
 
@@ -717,5 +760,61 @@ mod tests {
         // The server caps connections-per-IP at 64; the default plus the
         // transient setup connection must stay under it.
         assert!(ConcurrentConfig::default().clients < 64);
+    }
+
+    #[test]
+    fn statement_create_throughput_floor_is_spec_10k() {
+        // Combined-acceptance §Throughput: STATEMENT_CREATE ≥ 10K/s per shard.
+        assert_eq!(TputVerb::StatementCreate.target_ops_per_sec(), 10_000.0);
+        // ENCODE keeps its §19/02 per-shard floor.
+        assert_eq!(TputVerb::Encode.target_ops_per_sec(), 5_000.0);
+    }
+
+    #[test]
+    fn latency_target_maps_each_verb_to_its_spec_budget() {
+        let t = Targets::default();
+        // Typed-graph writes: 1 ms / 5 ms.
+        assert_eq!(
+            TputVerb::StatementCreate.latency_target(&t).p50_ms,
+            t.statement_create.p50_ms
+        );
+        assert_eq!(
+            TputVerb::RelationCreate.latency_target(&t).p99_ms,
+            t.relation_create.p99_ms
+        );
+        // Exact tier-1 resolve is gated by the tiers-1–2 budget.
+        assert_eq!(
+            TputVerb::EntityResolve.latency_target(&t).p50_ms,
+            t.entity_resolve_tier12.p50_ms
+        );
+        assert_eq!(TputVerb::Encode.latency_target(&t).p50_ms, t.encode.p50_ms);
+    }
+
+    #[test]
+    fn meets_latency_gates_at_the_budget() {
+        // Sample's latency_target is p50 ≤ 1 ms, p99 ≤ 5 ms.
+        let mut r = sample("statement_create", 10, 0, 0);
+        r.p50_ms = 1.0;
+        r.p99_ms = 5.0;
+        // At the budget on both axes → passes.
+        assert!(r.meets_latency());
+        // p50 over budget → fails.
+        r.p50_ms = 1.5;
+        assert!(!r.meets_latency());
+    }
+
+    #[test]
+    fn meets_latency_p50_only_when_p99_ungated() {
+        // A verb whose spec bounds only P50 (p99 = INFINITY) gates on P50.
+        let mut r = sample("entity_resolve", 10, 0, 0);
+        r.latency_target = VerbTarget {
+            p50_ms: 1.0,
+            p99_ms: f64::INFINITY,
+        };
+        r.p50_ms = 1.0;
+        r.p99_ms = 9_999.0; // arbitrarily large P99 tolerated
+        assert!(r.meets_latency());
+        r.p50_ms = 1.1; // over the P50 floor → fails
+        assert!(!r.meets_latency());
     }
 }

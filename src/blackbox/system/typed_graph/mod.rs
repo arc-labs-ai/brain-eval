@@ -24,16 +24,32 @@ use std::net::SocketAddr;
 use super::ScenarioOutcome;
 
 pub mod entity;
+pub mod entity_merge;
 pub mod extraction;
+pub mod provenance;
+pub mod read_introspect;
 pub mod relation;
+pub mod relation_traverse;
+pub mod resolution_breadth;
+pub mod scaffolds;
 pub mod schema;
+pub mod schema_drop;
 pub mod statement;
+pub mod statement_depth;
 
 pub use entity::entity_lifecycle;
+pub use entity_merge::entity_merge_unmerge;
 pub use extraction::extraction_pipeline;
+pub use provenance::provenance_versioning;
+pub use read_introspect::read_introspection;
 pub use relation::relation_lifecycle;
+pub use relation_traverse::relation_traversal;
+pub use resolution_breadth::resolution_breadth;
+pub use scaffolds::run_typed_graph_scaffolds;
 pub use schema::schema_lifecycle;
+pub use schema_drop::schema_drop;
 pub use statement::statement_lifecycle;
+pub use statement_depth::statement_depth;
 
 /// Built-in `Person` entity type id, seeded by the `brain:` system schema
 /// at byte zero (see `crates/brain-metadata/src/system_schema/schema.brain`).
@@ -45,9 +61,16 @@ pub(crate) const PERSON_TYPE_ID: u32 = 1;
 pub async fn run_typed_graph_scenarios(endpoint: SocketAddr) -> Vec<ScenarioOutcome> {
     vec![
         schema_lifecycle(endpoint).await,
+        schema_drop(endpoint).await,
         entity_lifecycle(endpoint).await,
+        entity_merge_unmerge(endpoint).await,
+        resolution_breadth(endpoint).await,
         statement_lifecycle(endpoint).await,
+        statement_depth(endpoint).await,
+        provenance_versioning(endpoint).await,
         relation_lifecycle(endpoint).await,
+        relation_traversal(endpoint).await,
+        read_introspection(endpoint).await,
         extraction_pipeline(endpoint).await,
     ]
 }

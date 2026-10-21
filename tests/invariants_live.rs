@@ -5,14 +5,24 @@
 //! slot-version staleness) against it. These are correctness gates — every
 //! scenario must pass.
 //!
-//! `#[ignore]`d: needs Docker + a `brain:<tag>` image + the `brain-models`
-//! volume. Run:
+//! Two modes, selected by `BRAIN_EVAL_ENDPOINT`:
+//!
+//! - **unset** — boots its own throwaway `brain:<tag>` container (needs Docker,
+//!   a `brain:<tag>` image, and the `brain-models` volume; override the tag
+//!   with `BRAIN_EVAL_IMAGE_TAG`, default `latest`).
+//! - **set** — runs the same scenarios against that already-running server,
+//!   minting keys through its admin plane (`BRAIN_EVAL_ADMIN_SECRET` /
+//!   `BRAIN_EVAL_ADMIN_PORT`).
+//!
+//! `#[ignore]`d. Run:
 //!
 //! ```bash
+//! # docker mode
 //! cargo test --test invariants_live -- --ignored --nocapture
+//! # external mode
+//! BRAIN_EVAL_ENDPOINT=127.0.0.1:9090 BRAIN_EVAL_ADMIN_SECRET=eval-admin-secret \
+//!   cargo test --test invariants_live -- --ignored --nocapture
 //! ```
-//!
-//! Override the image tag with `BRAIN_EVAL_IMAGE_TAG` (default `latest`).
 
 #![cfg(not(miri))]
 
@@ -34,9 +44,9 @@ async fn invariant_scenarios_all_pass() {
         ..DockerServerOpts::default()
     };
 
-    let server = ServerHandle::start_docker(opts)
+    let server = ServerHandle::from_env_or_docker(opts)
         .await
-        .expect("full-stack server should boot and become healthy");
+        .expect("server should be reachable (external) or boot and become healthy (docker)");
 
     let outcomes = run_invariant_scenarios(server.endpoint()).await;
     server.stop().await;

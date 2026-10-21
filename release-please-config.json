@@ -1,0 +1,60 @@
+{
+  "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
+  "packages": {
+    ".": {
+      "release-type": "rust",
+      "package-name": "brain-eval",
+      "changelog-path": "CHANGELOG.md",
+      "include-component-in-tag": false,
+      "include-v-in-tag": true,
+      "changelog-sections": [
+        {
+          "type": "fix",
+          "section": "Fixes"
+        },
+        {
+          "type": "feat",
+          "section": "Features"
+        },
+        {
+          "type": "perf",
+          "section": "Performance"
+        },
+        {
+          "type": "refactor",
+          "section": "Refactoring"
+        },
+        {
+          "type": "test",
+          "section": "Tests and verification"
+        },
+        {
+          "type": "review",
+          "section": "Tests and verification"
+        },
+        {
+          "type": "build",
+          "section": "Build and tooling"
+        },
+        {
+          "type": "ci",
+          "section": "Build and tooling"
+        },
+        {
+          "type": "docs",
+          "section": "Documentation"
+        },
+        {
+          "type": "chore",
+          "section": "Chores",
+          "hidden": true
+        },
+        {
+          "type": "style",
+          "section": "Formatting",
+          "hidden": true
+        }
+      ]
+    }
+  }
+}

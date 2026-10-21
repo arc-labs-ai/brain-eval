@@ -83,6 +83,23 @@ pub struct BenchmarkMeta {
     pub instance_count: usize,
     /// Brain version reporting this run (cargo pkg version).
     pub brain_version: String,
+    /// How many conversations the runner drove at once
+    /// (`BRAIN_EVAL_CONCURRENCY`; `1` is strictly sequential).
+    ///
+    /// Recorded for the same reason as the judge temperature: it changes
+    /// what the numbers MEAN. The read/write latencies in this report are
+    /// measured under exactly this much concurrent load, so a run at 16 and
+    /// a run at 1 are not comparable on latency even though they are
+    /// directly comparable on accuracy — the former includes whatever
+    /// queueing the client induced. Without it in the meta, a faster report
+    /// is indistinguishable from a more aggressive one.
+    #[serde(default = "default_meta_concurrency")]
+    pub concurrency: usize,
+}
+
+/// Older reports predate the field; they were all strictly sequential.
+fn default_meta_concurrency() -> usize {
+    1
 }
 
 impl BenchmarkMeta {
@@ -120,7 +137,17 @@ impl BenchmarkMeta {
             run_started_unix_nanos,
             instance_count,
             brain_version: env!("CARGO_PKG_VERSION").to_owned(),
+            // Defaults to sequential; the runner stamps the real value via
+            // `with_concurrency` once its config is known.
+            concurrency: 1,
         }
+    }
+
+    /// Stamp the concurrency this run actually used.
+    #[must_use]
+    pub fn with_concurrency(mut self, concurrency: usize) -> Self {
+        self.concurrency = concurrency;
+        self
     }
 }
 

@@ -22,8 +22,8 @@ use crate::blackbox::scale::{
     ScaleConfig, Targets,
 };
 use crate::blackbox::system::{
-    kill_during_write, restart_recovery, run_core_scenarios, run_invariant_scenarios,
-    run_typed_graph_scenarios, storage_footprint,
+    kill_during_write, restart_recovery, run_admin_scenarios, run_core_scenarios,
+    run_invariant_scenarios, run_typed_graph_scenarios, storage_footprint,
 };
 use crate::client::auth::KeyMinter;
 use crate::client::harness::BrainEvalHarness;
@@ -273,6 +273,19 @@ pub async fn run_acceptance(cfg: AcceptanceConfig) -> AcceptanceReport {
                                 r.timeouts,
                             ),
                         });
+                        // Per-verb latency budget (spec §19.02 / acceptance
+                        // gate) under concurrency. A verb whose spec bounds
+                        // only P50 shows an unbounded (inf) P99 target.
+                        let lt = r.latency_target;
+                        gates.push(Gate {
+                            name: format!("latency:tput:{}", r.verb),
+                            perf: true,
+                            passed: r.meets_latency(),
+                            detail: format!(
+                                "p50 {:.2}ms (≤{:.0}) p99 {:.2}ms (≤{:.0})",
+                                r.p50_ms, lt.p50_ms, r.p99_ms, lt.p99_ms
+                            ),
+                        });
                     }
                     // Handling N concurrent clients with zero failed ops is a
                     // correctness property — it must hold on any hardware.
@@ -347,6 +360,17 @@ pub async fn run_acceptance(cfg: AcceptanceConfig) -> AcceptanceReport {
 
     // --- core-invariant "E5" suite (correctness gates) --------------
     for o in run_invariant_scenarios(cfg.endpoint).await {
+        gates.push(Gate {
+            name: o.name.to_string(),
+            perf: false,
+            passed: o.passed,
+            detail: o.detail,
+        });
+    }
+
+    // --- operator-admin "E7" suite: audit / rebuild / metrics
+    //     (correctness gates; drive the admin plane + /metrics) --------
+    for o in run_admin_scenarios(cfg.endpoint).await {
         gates.push(Gate {
             name: o.name.to_string(),
             perf: false,

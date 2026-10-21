@@ -19,8 +19,15 @@
 //! BRAIN_EVAL_BLESS_BASELINE=1 cargo test --test regression_live -- --ignored --nocapture
 //! ```
 //!
-//! `#[ignore]`d: needs Docker + a `brain:<tag>` image + the `brain-models`
-//! volume.
+//! Two modes, selected by `BRAIN_EVAL_ENDPOINT`:
+//!
+//! - **unset** — boots its own throwaway `brain:<tag>` container (needs Docker
+//!   + a `brain:<tag>` image + the `brain-models` volume).
+//! - **set** — runs the probe against that already-running server, minting a
+//!   data-plane key through its admin plane (`BRAIN_EVAL_ADMIN_SECRET` /
+//!   `BRAIN_EVAL_ADMIN_PORT`).
+//!
+//! `#[ignore]`d.
 
 #![cfg(not(miri))]
 
@@ -61,9 +68,9 @@ async fn recall_quality_no_regression() {
         ..DockerServerOpts::default()
     };
 
-    let server = ServerHandle::start_docker(opts)
+    let server = ServerHandle::from_env_or_docker(opts)
         .await
-        .expect("full-stack server should boot and become healthy");
+        .expect("server should be reachable (external) or boot and become healthy (docker)");
 
     let current = {
         // Mint a data-plane key through the booted server's admin plane.
@@ -139,8 +146,15 @@ fn read_baseline() -> RecallQualityReport {
         top_k: RECALL_TOP_K,
         recall_at_1,
         recall_at_k,
+        // The persisted baseline file only records recall@1/@K; the MRR/nDCG
+        // ranking metrics are advisory (not part of pass()), so a reconstructed
+        // baseline carries neutral zeros for them.
+        mrr: 0.0,
+        ndcg_at_k: 0.0,
         target_at_1: recall_at_1,
         target_at_k: recall_at_k,
+        target_mrr: 0.0,
+        target_ndcg: 0.0,
     }
 }
 

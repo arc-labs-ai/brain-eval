@@ -65,6 +65,7 @@ async fn run(endpoint: SocketAddr) -> Result<ScenarioOutcome, HarnessError> {
             dry_run: false,
             allow_breaking: false,
             request_id: new_id(),
+            act_as: None,
         })
         .await?;
 
@@ -104,6 +105,7 @@ async fn run(endpoint: SocketAddr) -> Result<ScenarioOutcome, HarnessError> {
         .get_schema(&SchemaGetRequest {
             namespace: ns.clone(),
             version: 0,
+            act_as: None,
         })
         .await?;
     if got.namespace != ns {
@@ -132,6 +134,7 @@ async fn run(endpoint: SocketAddr) -> Result<ScenarioOutcome, HarnessError> {
         .client()
         .validate_schema(&SchemaValidateRequest {
             schema_document: doc.clone(),
+            act_as: None,
         })
         .await?;
     if !valid.validation_errors.is_empty() {
@@ -153,6 +156,7 @@ async fn run(endpoint: SocketAddr) -> Result<ScenarioOutcome, HarnessError> {
         .client()
         .validate_schema(&SchemaValidateRequest {
             schema_document: bad_doc,
+            act_as: None,
         })
         .await?;
 
