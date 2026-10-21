@@ -7,6 +7,19 @@ license = "Apache-2.0"
 repository = "https://github.com/arc-labs-ai/brain-eval"
 description = "Evaluation, benchmarking, and report generation for Brain — the cognitive substrate for AI agents."
 
+# NOT PUBLISHED. This is an internal evaluation harness, not a library anyone
+# consumes: it drives a running brain-server, loads benchmark datasets and
+# writes reports. Publishing it would put the whole bench rig — dataset
+# loaders, blackbox/scale suites, scorers, reporters — on a public registry for
+# no one's benefit, and crates.io names cannot be reused once taken.
+#
+# `publish = false` makes `cargo publish` refuse outright, so this does not
+# depend on a workflow being absent or a secret being unset. It previously did:
+# the release workflow published on any `v*` tag, and the only thing stopping
+# it was that RELEASE_PLEASE_TOKEN was missing, so release-please's tag never
+# fired it. That is an accident holding a door shut, not a decision.
+publish = false
+
 [features]
 default = []
 # Enables LLM-as-judge + LLM answer synthesis. Off by default — real LLM
