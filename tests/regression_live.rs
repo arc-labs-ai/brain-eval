@@ -64,6 +64,15 @@ async fn recall_quality_no_regression() {
         data_port: 38086,
         metrics_port: 39097,
         admin_port: 39098,
+        // This gate — and only this gate — needs the cross-encoder.
+        // `tests/baselines/recall_quality.txt` was blessed with it on ("With
+        // the cross-encoder reranker on, recall@1 ... swings ~0.84-0.96"),
+        // and the probes are near-duplicates by design: exactly the case
+        // embedding similarity cannot separate. Run without it and this
+        // compares a different system to the baseline, scoring recall@1
+        // 0.100 against a 0.97 floor. It stays off elsewhere because it is
+        // several times slower and other floors are calibrated without it.
+        rerank: true,
         health_timeout: Duration::from_secs(180),
         ..DockerServerOpts::default()
     };

@@ -83,6 +83,19 @@ pub struct DockerServerOpts {
     /// mints data-plane keys through this port. Kept distinct from
     /// `data_port` / `metrics_port`.
     pub admin_port: u16,
+    /// Enable the cross-encoder reranker.
+    ///
+    /// Off by default, and deliberately so: Brain treats an
+    /// enabled-but-unloadable capability as a hard shard-spawn failure, and
+    /// reranking every read is several times slower. Most live gates neither
+    /// measure rerank nor want to pay for it — `soak_live`'s recall floor is
+    /// calibrated without it, and turning it on globally dropped that gate to
+    /// recall@1 0.200.
+    ///
+    /// `regression_live` opts in, because its committed baseline was blessed
+    /// with the cross-encoder on; comparing a rerank-off run against it is
+    /// apples to oranges and fails permanently.
+    pub rerank: bool,
     /// Named docker volume holding the model set (embed + classifier; the
     /// gliner), mounted read-only at `/models`. Provisioned by brain-db's
     /// `.devcontainer/bootstrap-model.sh`. The three subdirectories
@@ -109,6 +122,7 @@ impl Default for DockerServerOpts {
             data_port: 18080,
             metrics_port: 19091,
             admin_port: 19092,
+            rerank: false,
             models_volume: "brain-models".to_string(),
             arena_capacity: "256MiB".to_string(),
             data_volume: None,
@@ -133,6 +147,8 @@ const XDG_ENV: &str = "XDG_DATA_HOME=/xdg";
 /// embed model should fail with that path in the message rather than fall
 /// through discovery.
 const EMBED_DIR_ENV: &str = "BRAIN_EMBED_MODEL_DIR=/xdg/brain/models/bge-small-en-v1.5";
+/// Points the cross-encoder at the reranker in the same mounted volume.
+const RERANK_DIR_ENV: &str = "BRAIN_RERANK_MODEL_DIR=/xdg/brain/models/bge-reranker-base";
 
 /// Errors from booting or probing a docker-backed server.
 #[derive(Debug, thiserror::Error)]
@@ -159,6 +175,19 @@ pub enum ServerError {
         timeout: Duration,
         /// Tail of the container's log, captured before the container is
         /// removed.
+        log_tail: String,
+    },
+    /// The container exited before becoming healthy — almost always a
+    /// configuration error the server reports and then dies on.
+    ///
+    /// Separate from [`ServerError::HealthTimeout`] because the two call for
+    /// different things: a timeout means "too slow, maybe look at resources",
+    /// an exit means "it refused to start, read the line below".
+    #[error("server container exited with code {code} before becoming healthy; container log tail:\n{log_tail}")]
+    ContainerExited {
+        /// The container's exit code.
+        code: String,
+        /// Tail of the container's log, captured before removal.
         log_tail: String,
     },
     /// `BRAIN_EVAL_ENDPOINT` was set but is not a valid `host:port`.
@@ -338,6 +367,11 @@ impl ServerHandle {
             }
         }
 
+        // Per-test, not global: see `DockerServerOpts::rerank`. Off by
+        // default keeps every gate on the configuration its floor was
+        // calibrated against.
+        let rerank_env = format!("BRAIN__RERANK__ENABLED={}", opts.rerank);
+
         let mut args: Vec<&str> = vec![
             "run",
             "-d",
@@ -382,7 +416,29 @@ impl ServerHandle {
             // costs three minutes to learn nothing. The suite does not
             // measure rerank, so enabling it bought nothing and risked that.
             "-e",
-            "BRAIN__RERANK__ENABLED=false",
+            // Rerank ON, and the baseline is why.
+            //
+            // `tests/baselines/recall_quality.txt` was blessed *with the
+            // cross-encoder on* — its own header says so: "With the
+            // cross-encoder reranker on, recall@1 over the near-duplicate
+            // probe texts swings ~0.84-0.96 (recall@K stays 1.0)." Booting
+            // with rerank off measured a different system than the baseline
+            // describes, so `regression_live` compared apples to oranges and
+            // failed permanently: recall@1 0.100 against a 0.97 floor. The
+            // probes are near-duplicates by design, which is exactly the case
+            // embedding similarity cannot separate and a cross-encoder can.
+            //
+            // This was previously off for a good reason: Brain treats an
+            // enabled-but-unloadable capability as a hard shard-spawn
+            // failure, and a missing model turned every self-booting live
+            // test into a 180s "did not become healthy" timeout that said
+            // nothing. That reason is gone — `wait_healthy` now detects the
+            // exited container and reports its log, so the same mistake
+            // surfaces in well under a second with the server's own words.
+            //
+            // The model ships in the same `brain-models` volume already
+            // mounted for the embedder, so nothing new has to be provisioned.
+            &rerank_env,
             // The GLiNER classifier path is still NOT pinned, and now it
             // does not need to be. Brain treats a configured-but-unloadable
             // model as a hard shard-spawn failure, so naming a path the
@@ -404,6 +460,21 @@ impl ServerHandle {
         for e in &extra_env {
             args.push("-e");
             args.push(e);
+        }
+        // The cross-encoder needs its model directory, but only when it is
+        // actually enabled — naming a path for a disabled capability is noise,
+        // and Brain would fail the shard spawn if the path were wrong.
+        //
+        // This has to sit OUTSIDE the `llm_key_file` block below. It was
+        // inside it, which the indentation hid: `BRAIN__RERANK__ENABLED` is
+        // pushed unconditionally above, so a rerank-enabled run without an LLM
+        // key would have enabled the cross-encoder while withholding its model
+        // directory — the enabled-but-unloadable case that costs a hard
+        // shard-spawn failure. Brain needs a key to boot at all, so that
+        // combination is unreachable today; it should not depend on that.
+        if opts.rerank {
+            args.push("-e");
+            args.push(RERANK_DIR_ENV);
         }
         if let Some(f) = llm_key_file.as_ref() {
             args.push("--env-file");
@@ -535,6 +606,12 @@ impl ServerHandle {
     }
 
     /// Poll the container's docker healthcheck until `healthy`.
+    ///
+    /// Returns as soon as the container has *exited*, rather than polling a
+    /// corpse until the deadline. A container that dies on a config error is
+    /// dead in a second or two; waiting the full timeout for it turned one
+    /// bad env var into `timeout * number_of_live_tests` of CI with nothing
+    /// to show for it.
     async fn wait_healthy(&self, name: &str, timeout: Duration) -> Result<(), ServerError> {
         let deadline = Instant::now() + timeout;
         loop {
@@ -546,13 +623,32 @@ impl ServerHandle {
             if status == "healthy" {
                 return Ok(());
             }
+
+            // `.State.Health.Status` is empty for a container that is not
+            // running, so a dead container is indistinguishable from one
+            // still starting. Ask about the state itself.
+            let state = run_docker(&["inspect", "-f", "{{.State.Status}}", name])
+                .await
+                .map(|out| out.trim().to_string())
+                .unwrap_or_default();
+            if state == "exited" || state == "dead" {
+                let code = run_docker(&["inspect", "-f", "{{.State.ExitCode}}", name])
+                    .await
+                    .map(|out| out.trim().to_string())
+                    .unwrap_or_else(|_| "?".to_string());
+                return Err(ServerError::ContainerExited {
+                    code,
+                    log_tail: container_log_tail(name).await,
+                });
+            }
+
             if Instant::now() >= deadline {
                 // Read the log BEFORE returning: `Drop` removes the
                 // container, taking the cause with it.
-                let log_tail = run_docker(&["logs", "--tail", "40", name])
-                    .await
-                    .unwrap_or_else(|e| format!("(could not read container log: {e})"));
-                return Err(ServerError::HealthTimeout { timeout, log_tail });
+                return Err(ServerError::HealthTimeout {
+                    timeout,
+                    log_tail: container_log_tail(name).await,
+                });
             }
             sleep(Duration::from_millis(500)).await;
         }
@@ -576,6 +672,39 @@ impl Drop for ServerHandle {
 }
 
 /// Run a `docker` subcommand, returning stdout on success.
+/// Tail of a container's log, merging both streams.
+///
+/// `docker logs` replays the container's stdout on stdout and its stderr on
+/// stderr. `run_docker` returns stdout only, so a server that reports a fatal
+/// config error on stderr — which Brain does — produced an empty tail, and
+/// every boot failure read `log_tail: ""`. The whole point of capturing the
+/// tail is the line that says why; dropping half the streams dropped it.
+async fn container_log_tail(name: &str) -> String {
+    let output = Command::new("docker")
+        .args(["logs", "--tail", "40", name])
+        .output()
+        .await;
+    match output {
+        Ok(out) => {
+            let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
+            let err = String::from_utf8_lossy(&out.stderr);
+            if !err.trim().is_empty() {
+                if !text.is_empty() {
+                    text.push('\n');
+                }
+                text.push_str(&err);
+            }
+            let text = text.trim().to_string();
+            if text.is_empty() {
+                "(container produced no log output)".to_string()
+            } else {
+                text
+            }
+        }
+        Err(e) => format!("(could not read container log: {e})"),
+    }
+}
+
 async fn run_docker(args: &[&str]) -> Result<String, ServerError> {
     let output = Command::new("docker")
         .args(args)
