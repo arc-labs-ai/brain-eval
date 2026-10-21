@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.1](https://github.com/arc-labs-ai/brain-eval/compare/v0.1.0...v0.1.1) (2026-10-21)
+
+
+### Fixes
+
+* **eval:** report MRR, and guard every retrieval stat against going unreported ([49a2e8b](https://github.com/arc-labs-ai/brain-eval/commit/49a2e8b9aaffc5842afbf722ef6e10ae0d44bee1))
+
 ## 0.1.0 (2026-10-21)
 
 
