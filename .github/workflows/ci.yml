@@ -141,10 +141,57 @@ jobs:
       # (distinct ports / names / volumes) and cleans up after itself.
       # cargo runs the test binaries sequentially, so at most one container
       # is live at a time. `--ignored` selects exactly the live tests.
+      # Brain refuses to boot without an LLM provider key: write-time HyPE
+      # generation is mandatory and always-on, so there is no key-less mode to
+      # fall back to. Without this the container exits on a config error, and
+      # every live gate below fails for a reason that has nothing to do with
+      # what it tests. Fail the job here, with the cause, rather than 21 times
+      # over with a boot timeout.
+      - name: Require the LLM credential
+        run: |
+          if [ -z "${BRAIN__LLM__API_KEY}" ]; then
+            echo "::error::BRAIN_LLM_API_KEY secret is not set. Brain cannot boot \
+          without an LLM provider key (write-time HyPE is mandatory), so every \
+          live acceptance gate would fail on a config error. Set the secret in \
+          repo settings, or skip the live job."
+            exit 1
+          fi
+          # The provider is derived from the MODEL id, not from the key, and
+          # the built-in default is `gpt-4o-mini`. An Anthropic key with that
+          # default boots cleanly and then fails on every upstream call, which
+          # reads as a Brain fault rather than a config one. Require the pair
+          # to agree here instead.
+          case "${BRAIN__LLM__MODEL}" in
+            claude-*|anthropic/*) provider=anthropic ;;
+            "")                   provider=default-openai ;;
+            *)                    provider=openai ;;
+          esac
+          case "${BRAIN__LLM__API_KEY}" in
+            sk-ant-*) key=anthropic ;;
+            *)        key=other ;;
+          esac
+          if [ "$key" = "anthropic" ] && [ "$provider" != "anthropic" ]; then
+            echo "::error::BRAIN_LLM_API_KEY looks like an Anthropic key but \
+          BRAIN__LLM__MODEL is '${BRAIN__LLM__MODEL:-<unset, defaults to gpt-4o-mini>}', \
+          which routes to OpenAI. Set the BRAIN_LLM_MODEL repo variable to a \
+          claude-* model id."
+            exit 1
+          fi
+        env:
+          BRAIN__LLM__API_KEY: ${{ secrets.BRAIN_LLM_API_KEY }}
+          BRAIN__LLM__MODEL: ${{ vars.BRAIN_LLM_MODEL }}
+
       - name: Live acceptance gates
         working-directory: brain-eval
         env:
           BRAIN_EVAL_IMAGE_TAG: latest
+          # Forwarded by the harness into the container via a 0600 env-file;
+          # it never lands in a `docker run` argv.
+          BRAIN__LLM__API_KEY: ${{ secrets.BRAIN_LLM_API_KEY }}
+          # Brain derives the provider from the model id, so this is what
+          # selects Anthropic vs OpenAI; the key alone does not. The harness
+          # forwards it into the container alongside the key.
+          BRAIN__LLM__MODEL: ${{ vars.BRAIN_LLM_MODEL }}
         # The `live` profile pins test-threads=1 (each test boots its own
         # container). --run-ignored ignored-only selects exactly the live tests.
         run: cargo nextest run --release --profile live --run-ignored ignored-only --no-capture

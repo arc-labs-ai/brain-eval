@@ -13,17 +13,59 @@
 //! ```
 
 use std::collections::BTreeSet;
-use std::net::SocketAddr;
 use std::time::Duration;
 
 use brain_eval::bench::core::instance::TurnRecord;
 use brain_eval::client::harness::BrainEvalHarness;
+use brain_eval::client::server::{DockerServerOpts, ServerHandle};
 
-fn endpoint() -> SocketAddr {
-    std::env::var("BRAIN_EVAL_ENDPOINT")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or_else(|| "127.0.0.1:18080".parse().expect("default endpoint"))
+/// Boot a throwaway server for one test — or attach to the operator's, when
+/// `BRAIN_EVAL_ENDPOINT` is set.
+///
+/// These four used to call `BrainEvalHarness::connect(endpoint())`, which
+/// assumes a server is already listening on `127.0.0.1:18080` and mints
+/// against `BRAIN_EVAL_ADMIN_SECRET`. Nothing in CI provides either, so all
+/// four failed in under 20ms with `Mint(NoSecret)` — before asserting
+/// anything about membership. Every other live test boots its own container,
+/// which is the documented contract for the suite: "Every `#[ignore]` live
+/// test boots its own full-stack container (distinct ports / names /
+/// volumes) and cleans up after itself."
+///
+/// `from_env_or_docker` keeps the operator's escape hatch: set
+/// `BRAIN_EVAL_ENDPOINT` and it attaches instead of booting.
+async fn server_for(
+    name: &str,
+    data_port: u16,
+    metrics_port: u16,
+    admin_port: u16,
+) -> ServerHandle {
+    let tag = std::env::var("BRAIN_EVAL_IMAGE_TAG").unwrap_or_else(|_| "latest".to_string());
+    ServerHandle::from_env_or_docker(DockerServerOpts {
+        image_tag: tag,
+        container_name: format!("brain-eval-membership-{name}"),
+        data_port,
+        metrics_port,
+        // Distinct admin port too. `DockerServerOpts::default()` pins 19092,
+        // so leaving it defaulted collides with any other live test whose
+        // container is still up — the failure is a docker bind error, not
+        // anything about the invariant under test.
+        admin_port,
+        health_timeout: Duration::from_secs(180),
+        ..DockerServerOpts::default()
+    })
+    .await
+    .expect("server should be reachable (external) or boot and become healthy (docker)")
+}
+
+/// A harness bound to a fresh space on `server`.
+async fn harness_on(server: &ServerHandle) -> BrainEvalHarness {
+    BrainEvalHarness::connect_minted(
+        &server.key_minter(),
+        server.endpoint(),
+        brain_db_sdk::new_id(),
+    )
+    .await
+    .expect("connect to booted server")
 }
 
 fn turns(lines: &[&str]) -> Vec<TurnRecord> {
@@ -66,9 +108,8 @@ async fn recall_settled(
 #[tokio::test]
 #[ignore]
 async fn determinism_same_query_same_set() {
-    let h = BrainEvalHarness::connect(endpoint())
-        .await
-        .expect("connect");
+    let server = server_for("determinism", 38090, 39100, 39110).await;
+    let h = harness_on(&server).await;
     h.ingest(&turns(&[
         "The Zephyr-9 reactor was commissioned in Helsinki.",
         "Maple syrup production peaked during the cold snap.",
@@ -99,9 +140,8 @@ async fn determinism_same_query_same_set() {
 #[tokio::test]
 #[ignore]
 async fn monotone_recall_distinctive_fact() {
-    let h = BrainEvalHarness::connect(endpoint())
-        .await
-        .expect("connect");
+    let server = server_for("monotone", 38091, 39101, 39111).await;
+    let h = harness_on(&server).await;
     h.ingest(&turns(&[
         "Quentin adopted a three-legged greyhound named Pascal.",
         "The quarterly budget review was postponed to next Tuesday.",
@@ -137,16 +177,15 @@ async fn irrelevance_insensitivity() {
     ];
     let q = "What was Ingrid's dissertation about?";
 
-    let a = BrainEvalHarness::connect(endpoint())
-        .await
-        .expect("connect a");
+    let server = server_for("irrelevance", 38092, 39102, 39112).await;
+    let a = harness_on(&server).await;
     a.ingest(&turns(&base)).await.expect("ingest a");
     tokio::time::sleep(Duration::from_secs(2)).await;
     let ma = recall_settled(&a, q).await;
 
-    let b = BrainEvalHarness::connect(endpoint())
-        .await
-        .expect("connect b");
+    // A second space on the SAME server: distractors must be isolated by
+    // space, not by server, or the test would prove nothing about recall.
+    let b = harness_on(&server).await;
     let mut both: Vec<&str> = base.to_vec();
     both.extend_from_slice(&noise);
     b.ingest(&turns(&both)).await.expect("ingest b");
@@ -167,9 +206,8 @@ async fn irrelevance_insensitivity() {
 #[tokio::test]
 #[ignore]
 async fn abstention_on_unsupported_query() {
-    let h = BrainEvalHarness::connect(endpoint())
-        .await
-        .expect("connect");
+    let server = server_for("abstention", 38093, 39103, 39113).await;
+    let h = harness_on(&server).await;
     h.ingest(&turns(&[
         "The lighthouse keeper repainted the railings in June.",
         "Tidal charts for the strait were updated last week.",

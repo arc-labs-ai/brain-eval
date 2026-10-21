@@ -18,20 +18,45 @@
 
 use brain_eval::blackbox::scale::{run_scale, ScaleConfig, Targets};
 use brain_eval::client::harness::BrainEvalHarness;
+use brain_eval::client::server::{DockerServerOpts, ServerHandle};
+use std::time::Duration;
 
-fn endpoint() -> std::net::SocketAddr {
-    std::env::var("BRAIN_EVAL_ENDPOINT")
-        .unwrap_or_else(|_| "127.0.0.1:18080".to_string())
-        .parse()
-        .expect("BRAIN_EVAL_ENDPOINT must be host:port")
+/// Boot a throwaway server — or attach to the operator's, when
+/// `BRAIN_EVAL_ENDPOINT` is set.
+///
+/// This used to call `endpoint()`, which assumes a server is already
+/// listening on `127.0.0.1:18080` and mints against `BRAIN_EVAL_ADMIN_SECRET`.
+/// CI provides neither, so it failed in under 20ms with `Mint(NoSecret)` —
+/// before exercising anything it is meant to test. Every other live test
+/// boots its own container, which is the suite's documented contract.
+async fn server() -> ServerHandle {
+    let tag = std::env::var("BRAIN_EVAL_IMAGE_TAG").unwrap_or_else(|_| "latest".to_string());
+    ServerHandle::from_env_or_docker(DockerServerOpts {
+        image_tag: tag,
+        container_name: "brain-eval-scale-smoke".to_string(),
+        data_port: 38094,
+        metrics_port: 39104,
+        // Distinct from the 19092 default, which collides with any other
+        // live container still up.
+        admin_port: 39114,
+        health_timeout: Duration::from_secs(180),
+        ..DockerServerOpts::default()
+    })
+    .await
+    .expect("server should be reachable (external) or boot and become healthy (docker)")
 }
 
 #[tokio::test]
-#[ignore = "requires a running brain-server (set BRAIN_EVAL_ENDPOINT)"]
+#[ignore = "requires docker + a brain:<tag> image + the model volume"]
 async fn scale_smoke_produces_a_well_formed_report() {
-    let harness = BrainEvalHarness::connect(endpoint())
-        .await
-        .expect("connect to server");
+    let server = server().await;
+    let harness = BrainEvalHarness::connect_minted(
+        &server.key_minter(),
+        server.endpoint(),
+        brain_db_sdk::new_id(),
+    )
+    .await
+    .expect("connect to booted server");
 
     let cfg = ScaleConfig {
         ingest_n: 200,
