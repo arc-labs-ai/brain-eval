@@ -1,19 +1,27 @@
 # Local-development dependency override.
 #
 # Copy this file to `.cargo/config.toml` (gitignored) to build brain-eval
-# against a LOCAL `brain-sdk` checkout instead of the published git
-# dependency — e.g. to test against unpushed SDK changes.
+# against a LOCAL `brain-sdk` checkout instead of the published
+# `brain-db-sdk` crate from crates.io — e.g. to test against unreleased SDK
+# changes.
 #
 # Assumes the layout:
 #
 #   arc-labs-ai/
-#   ├── brain-sdk/                   # the SDK source (this repo's git dep)
+#   ├── brain-sdk/                   # the SDK source (published to crates.io)
 #   │   └── rust/                    # the brain-db-sdk crate
 #   └── brain-eval/                  # ← you are here
 #
-# The `paths` override replaces the `brain-db-sdk` git dependency with the
-# local crate by name — no edit to Cargo.toml needed, so clones without
-# this file build straight from GitHub. Adjust the path if your checkout
-# sits elsewhere.
+# A `[patch.crates-io]` entry here does the same job as one in Cargo.toml
+# but stays out of the committed manifest, so clones without this file
+# build straight from crates.io.
+#
+# CAVEAT: a patch only applies if the checkout's version SATISFIES the
+# requirement in Cargo.toml (`brain-db-sdk = "0.2"`). If it does not,
+# Cargo silently ignores the patch — it only warns `patch ... was not used
+# in the crate graph` — and builds the registry copy instead, so you get a
+# green build that never touched your local changes. Check for that
+# warning, or `cargo tree -i brain-db-sdk` to see which copy resolved.
 
-paths = ["../brain-sdk/rust"]
+[patch.crates-io]
+brain-db-sdk = { path = "../brain-sdk/rust" }

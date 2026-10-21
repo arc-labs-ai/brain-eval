@@ -43,8 +43,16 @@ Broad strokes — see [Architecture](#architecture) for the full module map.
 
 brain-eval depends on **the SDK only** (`brain-db-sdk`) — it is a black-box
 client that talks to a running `brain-server` over the wire, never the
-substrate's internal crates. It declares `brain-db-sdk = "0.1"` and, for
-side-by-side local development, patches that to the sibling SDK checkout:
+substrate's internal crates. It declares `brain-db-sdk = "0.2"` and resolves
+it from crates.io, so a bare clone of this repo builds on its own — no
+sibling checkout and no `[patch.crates-io]` block required.
+
+To develop against an unreleased SDK change, add a patch locally:
+
+```toml
+[patch.crates-io]
+brain-db-sdk = { path = "../brain-sdk/rust" }
+```
 
 ```
 arc-labs-ai/
@@ -53,10 +61,11 @@ arc-labs-ai/
 └── brain-eval/                    # ← this repo
 ```
 
-The `[patch.crates-io]` block in `Cargo.toml` points `brain-db-sdk` at
-`../brain-sdk/rust`. Remove it to build against the published crate once
-the SDK ships to crates.io. If your SDK checkout lives elsewhere, edit that
-one path entry.
+A patch only applies if its version *satisfies* the requirement above — if
+the checkout's version does not (e.g. a `0.3.0` checkout against `"0.2"`),
+Cargo silently ignores the patch, warns `patch ... was not used in the crate
+graph`, and builds the registry copy instead. Keep both in step, and revert
+the patch before committing.
 
 ## Authentication (mandatory)
 

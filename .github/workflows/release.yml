@@ -54,19 +54,13 @@ jobs:
       contents: read
       id-token: write # OIDC → crates.io trusted publishing
     steps:
-      # The sibling brain-sdk checkout reproduces the layout the
-      # `[patch.crates-io]` / path dep assumes, so the pre-publish verify build
-      # resolves the same way it does locally and in CI.
+      # No sibling brain-sdk checkout: `brain-db-sdk` resolves from
+      # crates.io, so the pre-publish verify build resolves exactly the way
+      # crates.io will when it verifies the uploaded package.
       - name: Checkout brain-eval
         uses: actions/checkout@v4
         with:
           path: brain-eval
-      - name: Checkout brain-sdk (sibling, for the path dep)
-        uses: actions/checkout@v4
-        with:
-          repository: arc-labs-ai/brain-sdk
-          ref: main
-          path: brain-sdk
 
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2

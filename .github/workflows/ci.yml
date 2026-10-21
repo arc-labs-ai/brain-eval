@@ -31,18 +31,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      # brain-eval depends on the SDK via `[patch.crates-io] brain-db-sdk =
-      # { path = "../brain-sdk/rust" }`, so the sibling SDK must sit at
-      # ../brain-sdk relative to this checkout.
+      # brain-eval depends only on the published `brain-db-sdk` from
+      # crates.io — no `[patch.crates-io]`, so no sibling SDK checkout is
+      # needed and this job exercises exactly what a bare clone builds.
       - name: Checkout brain-eval
         uses: actions/checkout@v4
         with:
           path: brain-eval
-      - name: Checkout brain-sdk (sibling, for the [patch] path)
-        uses: actions/checkout@v4
-        with:
-          repository: arc-labs-ai/brain-sdk
-          path: brain-sdk
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -88,11 +83,6 @@ jobs:
         uses: actions/checkout@v4
         with:
           path: brain-eval
-      - name: Checkout brain-sdk (sibling)
-        uses: actions/checkout@v4
-        with:
-          repository: arc-labs-ai/brain-sdk
-          path: brain-sdk
       # The server image is built from the brain repo's Dockerfile. If brain
       # is private, set a repo-scoped PAT in the `BRAIN_REPO_TOKEN` secret;
       # for a public repo the default checkout suffices.
