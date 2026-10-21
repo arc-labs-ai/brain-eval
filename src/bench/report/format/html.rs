@@ -51,6 +51,10 @@ fn verdict_class(v: Verdict) -> (&'static str, &'static str) {
         Verdict::Correct => ("v-correct", "correct"),
         Verdict::Partial => ("v-partial", "partial"),
         Verdict::Incorrect => ("v-incorrect", "incorrect"),
+        // Its own chip, not "incorrect". A retrieval-only run grades nothing,
+        // and a report that renders that as a wall of failures is worse than
+        // one that says plainly that no answer was judged.
+        Verdict::NotJudged => ("v-notjudged", "not judged"),
     }
 }
 
@@ -405,6 +409,9 @@ table.kv td{font-variant-numeric:tabular-nums}
 .chip.v-correct{background:color-mix(in srgb,var(--ok) 22%,transparent);color:var(--ok)}
 .chip.v-partial{background:color-mix(in srgb,var(--warn) 22%,transparent);color:var(--warn)}
 .chip.v-incorrect{background:color-mix(in srgb,var(--bad) 22%,transparent);color:var(--bad)}
+/* Not graded is not a failure: muted, so a retrieval-only run does not read
+   as a wall of red. */
+.chip.v-notjudged{background:color-mix(in srgb,var(--muted) 18%,transparent);color:var(--muted)}
 .ledger td.q,.ledger td.gt,.ledger td.ans,.ledger td.rz{max-width:280px;white-space:pre-wrap;word-break:break-word}
 .ledger td.rz{color:var(--muted);font-size:12px}
 .ledger tr.v-correct td:first-child{box-shadow:inset 3px 0 var(--ok)}

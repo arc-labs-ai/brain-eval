@@ -22,17 +22,41 @@ pub enum Verdict {
     Partial,
     /// Zero credit — answer is wrong, or absent when one was expected.
     Incorrect,
+    /// NOT GRADED — no answer was produced to grade.
+    ///
+    /// Emitted only by a retrieval-only run, which skips synthesis and both
+    /// judges. It is a fourth state rather than a `bool` beside the verdict
+    /// because the compiler then forces every consumer to decide what it
+    /// means; a flag can be ignored silently, and the one that matters —
+    /// accuracy — would have read these as failures.
+    ///
+    /// It is deliberately NOT zero credit. `Incorrect` means the system got
+    /// it wrong; this means nobody asked.
+    NotJudged,
 }
 
 impl Verdict {
     /// Numeric score for accuracy aggregation.
+    ///
+    /// `NotJudged` scores 0.0 only because the type must return something —
+    /// callers aggregating accuracy must filter it out with [`Self::is_graded`]
+    /// FIRST, or an ungraded run reads as a run where everything was wrong.
     #[must_use]
     pub fn score(self) -> f64 {
         match self {
             Self::Correct => 1.0,
             Self::Partial => 0.5,
-            Self::Incorrect => 0.0,
+            Self::Incorrect | Self::NotJudged => 0.0,
         }
+    }
+
+    /// Whether this verdict carries a judgement at all.
+    ///
+    /// The guard for every accuracy aggregation: an ungraded question belongs
+    /// in neither the numerator nor the denominator.
+    #[must_use]
+    pub const fn is_graded(self) -> bool {
+        !matches!(self, Self::NotJudged)
     }
 }
 

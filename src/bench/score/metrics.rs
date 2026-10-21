@@ -148,19 +148,35 @@ pub struct WriteQualityMetrics {
 #[must_use]
 pub fn compute_full_metrics(results: &[QuestionResult]) -> EvalMetrics {
     let total_questions = results.len();
-    let scores: Vec<f64> = results.iter().map(|r| r.score).collect();
+    // ACCURACY IS SCORED OVER GRADED QUESTIONS ONLY.
+    //
+    // A retrieval-only run synthesises no answer and calls no judge, so every
+    // verdict comes back `NotJudged`. Counting those in the denominator would
+    // report a flawless retrieval run as 0.0 accuracy — the exact misreading
+    // the variant exists to prevent. They are excluded from both sides, so a
+    // retrieval-only run reports accuracy over zero questions (0.0, with
+    // `correct`/`partial`/`incorrect` all zero) and the retrieval metrics
+    // carry the signal.
+    let graded: Vec<f64> = results
+        .iter()
+        .filter(|r| r.verdict.is_graded())
+        .map(|r| r.score)
+        .collect();
+    let graded_questions = graded.len();
 
     #[allow(clippy::float_cmp)]
-    let correct = scores.iter().filter(|&&s| s == 1.0).count();
-    let partial = scores
+    let correct = graded.iter().filter(|&&s| s == 1.0).count();
+    let partial = graded
         .iter()
         .filter(|&&s| (s - 0.5).abs() < f64::EPSILON)
         .count();
-    let incorrect = total_questions.saturating_sub(correct + partial);
-    let accuracy = if total_questions == 0 {
+    let incorrect = graded_questions.saturating_sub(correct + partial);
+    let accuracy = if graded_questions == 0 {
         0.0
     } else {
-        scores.iter().sum::<f64>() / total_questions as f64
+        #[allow(clippy::cast_precision_loss)]
+        let denom = graded_questions as f64;
+        graded.iter().sum::<f64>() / denom
     };
 
     let judge_results: Vec<JudgeResult> = results
@@ -216,34 +232,67 @@ fn is_decline(answer: &str) -> bool {
 fn compute_answer_shape(results: &[QuestionResult]) -> AnswerShapeMetrics {
     let mut m = AnswerShapeMetrics::default();
     let (mut single_sum, mut many_sum, mut abstained_sum) = (0.0_f64, 0.0_f64, 0.0_f64);
+    let (mut single_graded, mut many_graded, mut abstained_graded) = (0usize, 0usize, 0usize);
     let mut committed_not_wrong = 0usize;
+    let mut committed_graded = 0usize;
 
+    // SHAPE COUNTS COUNT EVERY QUESTION; ACCURACIES COUNT ONLY GRADED ONES.
+    //
+    // Same rule `compute_full_metrics` follows, for the same reason. The shape
+    // of an answer — one memory, a set, an honest abstention — is decided by
+    // the router and is just as real in a retrieval-only run, so `single`,
+    // `many`, `abstained`, `errored` and `committed` keep counting everything.
+    //
+    // The accuracies cannot. A retrieval-only run judges nothing, so every
+    // verdict is `NotJudged` and every score 0.0. Left in the denominator they
+    // dragged `single_accuracy`/`many_accuracy` to 0.0, while
+    // `committed_precision` went the other way: `NotJudged` is not
+    // `Incorrect`, so every ungraded answer counted as "committed and not
+    // wrong" and precision reported a flawless 1.0. The same run read as
+    // simultaneously perfect and catastrophic — both misreadings the
+    // `NotJudged` variant exists to prevent.
     for r in results {
+        let graded = r.verdict.is_graded();
         let committed_assertion = !is_decline(&r.system_answer);
         match r.answer_kind {
             AnswerKind::Single => {
                 m.single += 1;
-                single_sum += r.score;
+                if graded {
+                    single_graded += 1;
+                    single_sum += r.score;
+                }
                 if committed_assertion {
                     m.committed += 1;
-                    if !matches!(r.verdict, crate::bench::core::outcome::Verdict::Incorrect) {
-                        committed_not_wrong += 1;
+                    if graded {
+                        committed_graded += 1;
+                        if !matches!(r.verdict, crate::bench::core::outcome::Verdict::Incorrect) {
+                            committed_not_wrong += 1;
+                        }
                     }
                 }
             }
             AnswerKind::Many => {
                 m.many += 1;
-                many_sum += r.score;
+                if graded {
+                    many_graded += 1;
+                    many_sum += r.score;
+                }
                 if committed_assertion {
                     m.committed += 1;
-                    if !matches!(r.verdict, crate::bench::core::outcome::Verdict::Incorrect) {
-                        committed_not_wrong += 1;
+                    if graded {
+                        committed_graded += 1;
+                        if !matches!(r.verdict, crate::bench::core::outcome::Verdict::Incorrect) {
+                            committed_not_wrong += 1;
+                        }
                     }
                 }
             }
             AnswerKind::None => {
                 m.abstained += 1;
-                abstained_sum += r.score;
+                if graded {
+                    abstained_graded += 1;
+                    abstained_sum += r.score;
+                }
             }
             AnswerKind::Error => m.errored += 1,
         }
@@ -251,15 +300,25 @@ fn compute_answer_shape(results: &[QuestionResult]) -> AnswerShapeMetrics {
 
     #[allow(clippy::cast_precision_loss)]
     let mean = |sum: f64, n: usize| if n == 0 { 0.0 } else { sum / n as f64 };
-    m.single_accuracy = mean(single_sum, m.single);
-    m.many_accuracy = mean(many_sum, m.many);
-    m.abstained_accuracy = mean(abstained_sum, m.abstained);
+    m.single_accuracy = mean(single_sum, single_graded);
+    m.many_accuracy = mean(many_sum, many_graded);
+    m.abstained_accuracy = mean(abstained_sum, abstained_graded);
     #[allow(clippy::cast_precision_loss)]
     {
-        m.committed_precision = if m.committed == 0 {
-            1.0
+        // One rule: precision is measured over GRADED commitments, and when
+        // there are none there is nothing to report.
+        //
+        // The old code answered 1.0 when nothing was committed — "it asserted
+        // no falsehood because it asserted nothing". That reads as a perfect
+        // score for a run that demonstrated nothing, which is the same
+        // flattery as reporting 1.0 for answers no judge ever read. Both are
+        // "no denominator", and `compute_full_metrics` already answers that
+        // with 0.0; a run with nothing to measure says so in the retrieval
+        // metrics, not in a precision of 1.0.
+        m.committed_precision = if committed_graded == 0 {
+            0.0
         } else {
-            committed_not_wrong as f64 / m.committed as f64
+            committed_not_wrong as f64 / committed_graded as f64
         };
     }
     m
@@ -415,11 +474,133 @@ mod tests {
         assert!((m.committed_precision - 1.0).abs() < f64::EPSILON);
     }
 
+    /// A run that committed to nothing reports no precision, not perfect
+    /// precision.
+    ///
+    /// This asserted 1.0 until the retrieval-only work, on the reasoning that
+    /// the system "asserted no falsehood". True, and useless: it asserted
+    /// nothing at all, and a headline 1.0 flatters a run that demonstrated
+    /// nothing — the same flattery as reporting 1.0 for answers no judge ever
+    /// read. Precision is now measured over graded commitments, and with none
+    /// there is nothing to report.
     #[test]
-    fn no_committed_answers_is_vacuously_perfect_precision() {
+    fn no_committed_answers_reports_no_precision() {
         let results = vec![qr(AnswerKind::None, Verdict::Correct, "I don't know.")];
         let m = compute_answer_shape(&results);
-        assert_eq!(m.committed, 0);
-        assert!((m.committed_precision - 1.0).abs() < f64::EPSILON);
+        assert_eq!(m.committed, 0, "an abstention commits to nothing");
+        assert!(
+            m.committed_precision.abs() < f64::EPSILON,
+            "no graded commitments => nothing to report, not a perfect score"
+        );
+    }
+
+    // ── retrieval-only runs (accuracy plan §6) ────────────────────────────
+
+    /// THE MISREADING THIS GUARDS AGAINST. A retrieval-only run synthesises no
+    /// answer and calls no judge, so every verdict is `NotJudged`. If those
+    /// counted in the denominator, a flawless retrieval run would report
+    /// 0.0 accuracy and read as total failure.
+    #[test]
+    fn ungraded_questions_are_excluded_from_accuracy() {
+        let results = vec![
+            qr(AnswerKind::Single, Verdict::NotJudged, ""),
+            qr(AnswerKind::Single, Verdict::NotJudged, ""),
+            qr(AnswerKind::Many, Verdict::NotJudged, ""),
+        ];
+        let m = compute_full_metrics(&results);
+        assert_eq!(m.total_questions, 3, "the run still saw three questions");
+        assert_eq!(m.correct, 0);
+        assert_eq!(m.partial, 0);
+        assert_eq!(
+            m.incorrect, 0,
+            "ungraded must NOT be counted as incorrect — that is the bug"
+        );
+        assert!(
+            m.accuracy.abs() < f64::EPSILON,
+            "no graded questions => accuracy over an empty set"
+        );
+    }
+
+    /// The answer-shape breakdown follows the same rule as the headline
+    /// accuracy — and used not to.
+    ///
+    /// `compute_answer_shape` counted every question in its accuracy
+    /// denominators and treated `NotJudged` as "not Incorrect", so a
+    /// retrieval-only run reported `single_accuracy` 0.0 **and**
+    /// `committed_precision` 1.0 at the same time: the same run reading as
+    /// catastrophic and flawless at once, in the one mode the variant exists
+    /// to support.
+    #[test]
+    fn answer_shape_excludes_ungraded_from_accuracy_and_precision() {
+        let results = vec![
+            qr(AnswerKind::Single, Verdict::NotJudged, "Paris"),
+            qr(AnswerKind::Many, Verdict::NotJudged, "Paris, Berlin"),
+        ];
+        let m = compute_answer_shape(&results);
+
+        // Shape counts still describe what the router did.
+        assert_eq!(m.single, 1, "the router still returned one single answer");
+        assert_eq!(m.many, 1, "and one many answer");
+        assert_eq!(m.committed, 2, "both asserted something");
+
+        // Accuracies have nothing to average over.
+        assert!(
+            m.single_accuracy.abs() < f64::EPSILON,
+            "no graded single answers => accuracy over an empty set"
+        );
+        assert!(m.many_accuracy.abs() < f64::EPSILON, "likewise for many");
+        assert!(
+            m.committed_precision.abs() < f64::EPSILON,
+            "committed answers nobody judged must NOT report perfect precision \
+             — claiming 1.0 here is the bug"
+        );
+    }
+
+    /// Precision over a mixed run divides by the GRADED committed answers, so
+    /// an unjudged answer alongside a correct one cannot inflate or deflate it.
+    #[test]
+    fn answer_shape_precision_divides_by_graded_commitments() {
+        let results = vec![
+            qr(AnswerKind::Single, Verdict::Correct, "Berlin"),
+            qr(AnswerKind::Single, Verdict::NotJudged, "Paris"),
+        ];
+        let m = compute_answer_shape(&results);
+
+        assert_eq!(m.committed, 2, "both committed, graded or not");
+        assert!(
+            (m.committed_precision - 1.0).abs() < f64::EPSILON,
+            "one graded commitment, not wrong => 1.0, not 0.5"
+        );
+        assert!(
+            (m.single_accuracy - 1.0).abs() < f64::EPSILON,
+            "one graded single answer, correct => 1.0, not 0.5"
+        );
+    }
+
+    /// A mixed run scores only what was graded: one Correct out of one graded
+    /// question is 1.0, regardless of how many went unjudged alongside it.
+    #[test]
+    fn accuracy_is_scored_over_graded_questions_only() {
+        let results = vec![
+            qr(AnswerKind::Single, Verdict::Correct, "Berlin"),
+            qr(AnswerKind::Single, Verdict::NotJudged, ""),
+            qr(AnswerKind::Single, Verdict::NotJudged, ""),
+        ];
+        let m = compute_full_metrics(&results);
+        assert_eq!(m.correct, 1);
+        assert_eq!(m.incorrect, 0);
+        assert!(
+            (m.accuracy - 1.0).abs() < f64::EPSILON,
+            "1 correct of 1 graded = 1.0, not 1/3; got {}",
+            m.accuracy
+        );
+    }
+
+    #[test]
+    fn not_judged_is_not_graded_but_incorrect_is() {
+        assert!(!Verdict::NotJudged.is_graded());
+        for v in [Verdict::Correct, Verdict::Partial, Verdict::Incorrect] {
+            assert!(v.is_graded(), "{v:?} is a judgement");
+        }
     }
 }

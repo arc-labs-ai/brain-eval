@@ -560,7 +560,11 @@ impl ReadRollup {
         match r.verdict {
             Verdict::Correct => self.correct += 1,
             Verdict::Partial => self.partial += 1,
-            Verdict::Incorrect => {}
+            // Incorrect scores zero; NotJudged was never graded. Neither adds
+            // to a bucket — and the staged probe always judges, so NotJudged
+            // reaching here would mean the probe was run in a mode it does
+            // not support.
+            Verdict::Incorrect | Verdict::NotJudged => {}
         }
         match r.fail_stage {
             Some(s) if s.contains("abstention") => self.fail_abstention += 1,

@@ -811,7 +811,15 @@ impl EvalRunner {
                         .map(RetrievedMemory::from_wire)
                         .collect();
                     let latency = outcome.latency_ms;
-                    let answer = self.synth_answer(instance, &outcome).await;
+                    // Retrieval-only: the ranked list is already captured
+                    // above, and every retrieval metric is computed from it
+                    // plus the ground truth. Synthesis is pure downstream
+                    // cost here, so it does not run.
+                    let answer = if self.config.retrieval_only {
+                        String::new()
+                    } else {
+                        self.synth_answer(instance, &outcome).await
+                    };
                     (answer_kind, retrieved, latency, false, answer)
                 }
                 Err(e) => {
@@ -842,21 +850,39 @@ impl EvalRunner {
         let retrieved_memory_contents: Vec<String> =
             retrieved.iter().map(|m| m.text.clone()).collect();
         let memories_retrieved = retrieved_memory_contents.len();
-        let judged = self.judge_answer(instance, &system_answer).await;
+        // Both judges are LLM calls scoring an ANSWER. In retrieval-only mode
+        // there is no answer, so there is nothing to grade — and a fabricated
+        // verdict would be worse than none: `Incorrect` would read as "the
+        // system got it wrong" in every report that aggregates accuracy.
+        // `NotJudged` keeps that population out of the accuracy denominator.
+        let judged = if self.config.retrieval_only {
+            JudgeResult {
+                question_id: instance.question_id.clone(),
+                verdict: Verdict::NotJudged,
+                score: Verdict::NotJudged.score(),
+                reasoning: "retrieval-only run: no answer synthesised, nothing judged".to_owned(),
+            }
+        } else {
+            self.judge_answer(instance, &system_answer).await
+        };
         // Grade retrieval independently of synthesis: did Brain surface the
         // memory that supports the gold answer? Skip on a retrieval error
         // (nothing meaningful to grade).
-        let (context_supported, context_support_reasoning) = if retrieval_failed {
-            (None, String::new())
-        } else {
-            self.judge_support(instance, &retrieved_memory_contents)
-                .await
-        };
+        let (context_supported, context_support_reasoning) =
+            if retrieval_failed || self.config.retrieval_only {
+                (None, String::new())
+            } else {
+                self.judge_support(instance, &retrieved_memory_contents)
+                    .await
+            };
 
         // Attribute a non-correct answer to the stage that lost it. Skip
         // attribution on an infrastructure retrieval failure — that is not a
         // model/retrieval quality signal.
-        let fail_stage = if retrieval_failed {
+        // Attribution asks "which stage lost this answer?", which presumes an
+        // answer was graded. Without a verdict it cannot be computed, so it is
+        // absent rather than guessed.
+        let fail_stage = if retrieval_failed || self.config.retrieval_only {
             None
         } else {
             FailStage::attribute(

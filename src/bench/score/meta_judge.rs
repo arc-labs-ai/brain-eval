@@ -80,11 +80,17 @@ impl JudgeMetaReport {
     }
 }
 
-fn verdict_index(v: Verdict) -> usize {
+/// Index into the 3x3 agreement matrix.
+///
+/// `NotJudged` has no index: the meta-judge measures a JUDGE against human
+/// labels, so an ungraded verdict is not a judgement to score. Callers filter
+/// it out before building the matrix — see `LabeledVerdict::new`.
+fn verdict_index(v: Verdict) -> Option<usize> {
     match v {
-        Verdict::Correct => 0,
-        Verdict::Partial => 1,
-        Verdict::Incorrect => 2,
+        Verdict::Correct => Some(0),
+        Verdict::Partial => Some(1),
+        Verdict::Incorrect => Some(2),
+        Verdict::NotJudged => None,
     }
 }
 
@@ -98,15 +104,25 @@ pub fn meta_evaluate(labels: &[LabeledVerdict]) -> Option<JudgeMetaReport> {
     }
 
     let mut confusion = [[0_usize; 3]; 3];
+    // Counted inside the loop, not taken from `labels.len()`: ungraded pairs
+    // are skipped, and dividing agreement by a denominator that still
+    // included them would understate every rate below.
+    let mut graded = 0_usize;
     let mut exact = 0_usize;
     let mut adjacent = 0_usize;
     let mut signed = 0.0_f64;
     let mut abs = 0.0_f64;
 
     for l in labels {
-        let gi = verdict_index(l.gold);
-        let ji = verdict_index(l.judge);
+        // An ungraded verdict on either side is not a judgement, so it is not
+        // a data point about judge agreement. Skipping keeps it out of the
+        // matrix AND out of every rate derived from it below, rather than
+        // silently binning it as "incorrect".
+        let (Some(gi), Some(ji)) = (verdict_index(l.gold), verdict_index(l.judge)) else {
+            continue;
+        };
         confusion[gi][ji] += 1;
+        graded += 1;
         if gi == ji {
             exact += 1;
         }
@@ -119,16 +135,20 @@ pub fn meta_evaluate(labels: &[LabeledVerdict]) -> Option<JudgeMetaReport> {
         abs += d.abs();
     }
 
+    // Every pair was ungraded: there is no judge agreement to report.
+    if graded == 0 {
+        return None;
+    }
     #[allow(clippy::cast_precision_loss)]
-    let nf = n as f64;
+    let nf = graded as f64;
     let exact_agreement = exact as f64 / nf;
     let adjacent_agreement = adjacent as f64 / nf;
     let score_bias = signed / nf;
     let score_mae = abs / nf;
-    let cohens_kappa = cohens_kappa(&confusion, n);
+    let cohens_kappa = cohens_kappa(&confusion, graded);
 
     Some(JudgeMetaReport {
-        n,
+        n: graded,
         exact_agreement,
         adjacent_agreement,
         cohens_kappa,
