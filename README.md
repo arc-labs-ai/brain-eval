@@ -77,7 +77,7 @@ connects with it. Every command in [Quick start](#quick-start) and
 below assumes this is set up.
 
 - **Docker-boot runs** (the `*_live` tests via `ServerHandle::start_docker`,
-  and the sibling `brain` repo's `just up` docker path) configure this
+  and the sibling `brain-db` repo's `just docker-serve` path) configure this
   automatically: the harness sets the server's admin secret + admin
   address and mints against the loopback admin port. Nothing to do.
 - **External-server runs** (you boot `brain-server` yourself and point
@@ -130,6 +130,41 @@ Without `--features live-llm` (or without a key), every command below
 still runs — just on the heuristic judge. Fine as a free smoke check; not
 for headline LongMemEval/LoCoMo accuracy.
 
+## Retrieval-only runs
+
+Judge noise can be wider than the thing you are measuring. Three runs over
+identically ingested data scored **0.628 / 0.648 / 0.673** — a 4.5-point spread
+with the inputs held constant, which is wider than most retrieval changes worth
+making. Tuning retrieval against a number that moves that much on its own tells
+you very little.
+
+`BRAIN_EVAL_RETRIEVAL_ONLY=1` takes the LLM out of the loop: no answer
+synthesis, no answer judge, no support judge. Three LLM calls per question
+become zero, so a run is free, fast, and deterministic. **Retrieval itself is
+untouched** — same RECALL, same ranking, same `top_k`.
+
+```bash
+BRAIN_EVAL_RETRIEVAL_ONLY=1 cargo run --bin brain-eval -- bench --dataset dmr
+```
+
+What changes in the report:
+
+- Every verdict is `NotJudged`, and **accuracy is scored over graded questions
+  only**. A retrieval-only run therefore reports accuracy over zero questions
+  rather than 0.0-out-of-N — counting ungraded questions in the denominator
+  would make a flawless retrieval run read as total failure.
+- The retrieval metrics carry the signal: **recall@k**, **nDCG@k**, and
+  **MRR** (mean reciprocal rank).
+
+MRR earns its place alongside recall@k because it is sensitive to *where* in
+the ranking the first relevant memory lands, not merely whether it appeared in
+the top k. Two runs with identical recall@5 can differ sharply in MRR — one
+putting the right memory first, the other fifth — and that difference is
+exactly what reranking and beam-width changes move.
+
+> MRR is computed and present in the JSON report (`RetrievalStats.mrr`); the
+> text and HTML reporters do not print it yet.
+
 ## Quick start
 
 ### Build
@@ -144,7 +179,7 @@ cargo clippy --all-targets -- -D warnings
 ### Run a benchmark against a live server
 
 `brain-server` is Linux-only (Glommio + `io_uring`); run it on a Linux host
-or inside the sibling `brain` repo's dev container.
+or inside the sibling `brain-db` repo's dev container (`just docker-up`).
 
 ```bash
 # 1. Start a brain-server. The admin token is mandatory — brain-server
@@ -400,6 +435,7 @@ brain-eval/
 | `BRAIN_EVAL_DATASETS_DIR` | _(unset)_ | Root containing `dmr/dmr.jsonl`, etc. |
 | `BRAIN_EVAL_MAX_QUESTIONS` | _(unset = all)_ | Smoke-mode cap. |
 | `BRAIN_EVAL_TOP_K` | `50` | `top_k` (max_results) passed to RECALL. |
+| `BRAIN_EVAL_RETRIEVAL_ONLY` | _(unset = off)_ | Truthy (`1`/`true`) skips answer synthesis and both judges — zero LLM calls per question. Verdicts come back `NotJudged`, accuracy is scored over graded questions only, and the retrieval metrics (recall@k, nDCG@k, MRR) carry the signal. See [Retrieval-only runs](#retrieval-only-runs). |
 | `BRAIN_EVAL_OUTPUT_DIR` | `target/eval-reports` | Where reports land. |
 | `BRAIN_EVAL_FORMATS` | `json,text` | Comma list of `json` / `text`. |
 | `BRAIN_EVAL_QUESTION_TYPES` | _(unset = all)_ | Comma list restricting the run to specific question-type tags (e.g. `single_hop`). |
