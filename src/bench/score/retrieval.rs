@@ -274,6 +274,48 @@ mod tests {
 
     // ── MRR ───────────────────────────────────────────────────────────────
 
+    /// Every field of `RetrievalStats` must appear in every reporter.
+    ///
+    /// `mrr` was computed for a whole release and printed by none of them —
+    /// the one rank-based metric in the struct, invisible on exactly the
+    /// corpus its own doc comment says it exists for. Listing the fields by
+    /// hand would repeat the mistake, so they are read out of this file's own
+    /// source: add a field to the struct and this fails until all three
+    /// reporters show it.
+    #[test]
+    fn every_retrieval_stat_reaches_every_reporter() {
+        let own = include_str!("retrieval.rs");
+        let body = own
+            .split_once("pub struct RetrievalStats {")
+            .expect("struct RetrievalStats")
+            .1
+            .split_once("\n}")
+            .expect("end of struct")
+            .0;
+        let fields: Vec<&str> = body
+            .lines()
+            .filter_map(|l| l.trim().strip_prefix("pub "))
+            .filter_map(|l| l.split_once(':'))
+            .map(|(name, _)| name)
+            .collect();
+        assert!(fields.len() >= 6, "parsed too few fields: {fields:?}");
+
+        // The two file reporters are the complete record and must carry
+        // every stat. The CLI summary is a deliberate one-screen subset (it
+        // prints recall@k and MRR, not nDCG), so it is not held to this.
+        for (reporter, src) in [
+            ("text", include_str!("../report/format/text.rs")),
+            ("html", include_str!("../report/format/html.rs")),
+        ] {
+            for field in &fields {
+                assert!(
+                    src.contains(&format!("r.{field}")),
+                    "{reporter} reporter never shows RetrievalStats::{field}",
+                );
+            }
+        }
+    }
+
     #[test]
     fn reciprocal_rank_is_one_over_the_first_hit() {
         let ranked = vec!["x".to_owned(), "y".to_owned(), "hit".to_owned()];

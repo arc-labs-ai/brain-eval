@@ -237,6 +237,10 @@ fn render(report: &BenchmarkReport) -> String {
             ("recall@10", r.recall_at_10),
             ("ndcg@5", r.ndcg_at_5),
             ("ndcg@10", r.ndcg_at_10),
+            // MRR is the one row here that is NOT a deprecated lexical
+            // diagnostic: it reads rank position, so it keeps separating runs
+            // after recall@10 saturates at 1.0 on a small corpus.
+            ("mrr", r.mrr),
         ] {
             let _ = write!(h, "<tr><th>{label}</th><td>{}</td></tr>", pct_bar(v));
         }

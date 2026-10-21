@@ -162,8 +162,11 @@ the top k. Two runs with identical recall@5 can differ sharply in MRR — one
 putting the right memory first, the other fifth — and that difference is
 exactly what reranking and beam-width changes move.
 
-> MRR is computed and present in the JSON report (`RetrievalStats.mrr`); the
-> text and HTML reporters do not print it yet.
+MRR is reported everywhere the other retrieval stats are: the JSON report
+(`RetrievalStats.mrr`), the text and HTML reports, and the CLI summary line. A
+test reads the fields out of `RetrievalStats` and fails if either file reporter
+stops showing one, which is how MRR came to be missing from all three in the
+first place.
 
 ## Quick start
 

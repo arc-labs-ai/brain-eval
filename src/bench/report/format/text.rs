@@ -120,6 +120,9 @@ impl Reporter for TextReporter {
                 "    NDCG@5    : {:.4}    NDCG@10   : {:.4}",
                 r.ndcg_at_5, r.ndcg_at_10
             )?;
+            // Not deprecated: MRR reads rank, not lexical overlap, so it
+            // still separates runs once recall@10 saturates.
+            writeln!(f, "    MRR       : {:.4}", r.mrr)?;
         }
         writeln!(f)?;
 

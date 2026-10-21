@@ -112,6 +112,12 @@ impl RecallQualityReport {
 
 /// Reciprocal rank of a hit at 0-indexed position `rank`: `1/(rank+1)`.
 /// `None` (the relevant memory was not retrieved) contributes 0.
+///
+/// Deliberately separate from `bench::score::retrieval::reciprocal_rank`, which
+/// takes a slice and a predicate because bench relevance is a substring test.
+/// Here the position is already known from the hit scan above, so taking it
+/// directly avoids walking the list twice. The two must agree on the 1-based
+/// convention: change one, check the other.
 fn reciprocal_rank(rank: Option<usize>) -> f64 {
     match rank {
         Some(r) => 1.0 / (r as f64 + 1.0),

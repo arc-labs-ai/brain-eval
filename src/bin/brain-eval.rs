@@ -566,6 +566,9 @@ fn print_metrics(m: &brain_eval::bench::score::metrics::EvalMetrics) {
             "recall@k  : @1 {:.4}   @5 {:.4}   @10 {:.4}   (DEPRECATED substring diagnostic)",
             r.recall_at_1, r.recall_at_5, r.recall_at_10
         );
+        // MRR is rank-based rather than lexical, so it stays informative
+        // where the recall@k line above has already saturated.
+        println!("mrr       : {:.4}", r.mrr);
     }
     println!(
         "latency   : write p50/p95 {}/{} ms    read p50/p95 {}/{} ms",
