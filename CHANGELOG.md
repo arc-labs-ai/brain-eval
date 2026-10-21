@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.2](https://github.com/arc-labs-ai/brain-eval/compare/v0.1.1...v0.1.2) (2026-10-21)
+
+
+### Fixes
+
+* **live:** make the live suite boot its own servers and say why it failed ([0f4d7cd](https://github.com/arc-labs-ai/brain-eval/commit/0f4d7cd16c4bafff88b3c47938ba927bf18e092f))
+
 ## [0.1.1](https://github.com/arc-labs-ai/brain-eval/compare/v0.1.0...v0.1.1) (2026-10-21)
 
 
