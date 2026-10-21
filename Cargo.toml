@@ -1,6 +1,6 @@
 [package]
 name = "brain-eval"
-version = "1.0.0"
+version = "0.1.0"
 edition = "2021"
 rust-version = "1.95"
 license = "Apache-2.0"
