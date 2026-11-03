@@ -246,12 +246,18 @@ jobs:
           BRAIN_EVAL_IMAGE_TAG: latest
           # Brain resolves per namespace through the broker above. The URL is
           # ordinary config; the service key is Brain's identity to the broker
-          # and rides the same 0600 env-file as the provider key.
+          # and rides a 0600 env-file, never a `docker run` argv.
           BRAIN__LLM__BROKER__URL: http://host.docker.internal:9099
           BRAIN__LLM__BROKER__SERVICE_KEY: brain-eval-ci-broker
-          # Forwarded by the harness into the container via a 0600 env-file;
-          # it never lands in a `docker run` argv.
-          BRAIN__LLM__API_KEY: ${{ secrets.BRAIN_LLM_API_KEY }}
+          # `BRAIN__LLM__API_KEY` is deliberately absent. It is the shard-wide
+          # fallback, not the serving credential — Brain's own config says
+          # setting it "does not make a keyless namespace work" — and its boot
+          # preflight makes a 1-token completion *only when it is present*,
+          # refusing to start if the provider rejects it. The broker holds the
+          # real credential (see the step above) and proxies completions, so
+          # the server needs none of its own. The harness also drops it
+          # whenever a broker is configured; this keeps the workflow honest
+          # about why rather than relying on that.
           # Brain derives the provider from the model id, so this is what
           # selects Anthropic vs OpenAI; the key alone does not. The harness
           # forwards it into the container alongside the key.
