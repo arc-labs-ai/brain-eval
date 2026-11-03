@@ -199,7 +199,7 @@ pub enum ServerError {
     Io(#[from] std::io::Error),
 }
 
-/// A temp env-file holding one `KEY=VALUE` line, created with owner-only
+/// A temp env-file holding one `KEY=VALUE` line per secret, created with owner-only
 /// permissions and removed on drop. Used to forward a real secret (e.g.
 /// an LLM provider key) into `docker run` via `--env-file` instead of
 /// `-e KEY=VALUE` — `-e` bakes the value into the process's argv, which
@@ -215,7 +215,12 @@ struct SecretEnvFile {
 }
 
 impl SecretEnvFile {
-    fn write(key: &str, value: &str) -> std::io::Result<Self> {
+    /// Write every `(key, value)` pair as its own line.
+    ///
+    /// Plural because there are now two secrets to forward — the provider key
+    /// and the broker service key — and one file keeps them on the same 0600
+    /// lifetime rather than two paths to clean up.
+    fn write_many(pairs: &[(String, String)]) -> std::io::Result<Self> {
         use std::io::Write;
 
         let path = std::env::temp_dir().join(format!(
@@ -231,7 +236,9 @@ impl SecretEnvFile {
             opts.mode(0o600);
         }
         let mut file = opts.open(&path)?;
-        writeln!(file, "{key}={value}")?;
+        for (key, value) in pairs {
+            writeln!(file, "{key}={value}")?;
+        }
         Ok(Self { path })
     }
 
@@ -336,16 +343,41 @@ impl ServerHandle {
             .data_volume
             .as_ref()
             .map(|v| format!("{v}:/var/lib/brain/data"));
-        // Forward the single shared LLM credential into the container. Brain
-        // requires it: write-time HyPE is mandatory, so the server refuses to
-        // boot without a provider key. The provider is derived from the model
-        // id, so this one var (`BRAIN__LLM__API_KEY`) covers OpenAI or
-        // Anthropic — set `BRAIN__LLM__MODEL` to pick. Passed via a 0600 temp
-        // env-file (see `SecretEnvFile`), not `-e`, so a real API key never
-        // lands in this process's argv.
-        let llm_key_file: Option<SecretEnvFile> = match std::env::var("BRAIN__LLM__API_KEY") {
-            Ok(v) if !v.is_empty() => Some(SecretEnvFile::write("BRAIN__LLM__API_KEY", &v)?),
-            _ => None,
+        // Forward the LLM credential configuration into the container.
+        //
+        // `BRAIN__LLM__API_KEY` alone no longer boots a server, and the whole
+        // live tier failed on that for weeks with every one of its 21 tests
+        // dying in under half a second:
+        //
+        //     config error: invalid config: `[llm.broker]` is missing. Brain
+        //     resolves an LLM credential per namespace: the serving key is not
+        //     known until a write names its namespace, so there is nothing for
+        //     a process-wide key to serve. `[llm] api_key` is not a
+        //     substitute.
+        //
+        // So the broker is what has to be forwarded. `scripts/ci-llm-broker.py`
+        // is the stand-in CI runs for the Arc gateway; point
+        // `BRAIN__LLM__BROKER__URL` at it and `BRAIN__LLM__BROKER__SERVICE_KEY`
+        // is Brain's own identity to it — not a provider key.
+        //
+        // `BRAIN__LLM__API_KEY` is still forwarded when set. It is read by the
+        // shard-wide fallback rather than the per-namespace path, so it is
+        // additive to the broker and not a replacement for it.
+        //
+        // Both secrets ride a 0600 temp env-file (see `SecretEnvFile`) rather
+        // than `-e`, so neither lands in this process's argv.
+        let mut secret_env: Vec<(String, String)> = Vec::new();
+        for key in ["BRAIN__LLM__API_KEY", "BRAIN__LLM__BROKER__SERVICE_KEY"] {
+            if let Ok(v) = std::env::var(key) {
+                if !v.is_empty() {
+                    secret_env.push((key.to_string(), v));
+                }
+            }
+        }
+        let llm_key_file: Option<SecretEnvFile> = if secret_env.is_empty() {
+            None
+        } else {
+            Some(SecretEnvFile::write_many(&secret_env)?)
         };
         // Bind the admin plane to the container's external interface (it
         // defaults to loopback) and gate it with a known secret, so the eval
@@ -359,7 +391,7 @@ impl ServerHandle {
         // staged/probe run can turn on the server's `brain_debug::stage`
         // journal). The API key is NOT here — it rides the 0600 env-file.
         let mut extra_env: Vec<String> = Vec::new();
-        for key in ["BRAIN__LLM__MODEL", "BRAIN_LOG"] {
+        for key in ["BRAIN__LLM__MODEL", "BRAIN_LOG", "BRAIN__LLM__BROKER__URL"] {
             if let Ok(v) = std::env::var(key) {
                 if !v.is_empty() {
                     extra_env.push(format!("{key}={v}"));
@@ -379,6 +411,13 @@ impl ServerHandle {
             &opts.container_name,
             // io_uring under Docker Desktop's VM needs the default seccomp
             // profile relaxed AND the memlock rlimit raised.
+            // A broker running on the host (as in CI) is not reachable from
+            // inside the container by `127.0.0.1`. This mapping is what makes
+            // `BRAIN__LLM__BROKER__URL=http://host.docker.internal:9099`
+            // resolve on Linux runners, where Docker Desktop's automatic
+            // mapping does not exist.
+            "--add-host",
+            "host.docker.internal:host-gateway",
             "--security-opt",
             "seccomp=unconfined",
             "--ulimit",
