@@ -5,7 +5,7 @@
 //! pipeline got there, treating the trace as a gate rather than a debug aid
 //! (§19/06 "read introspection & filtered recall"):
 //!
-//! - **TRACE** — `trace = true` must return a per-stage [`RecallTrace`] on the
+//! - **TRACE** — `trace = true` must return a per-stage [`brain_db_sdk::wire::types::RecallTrace`] on the
 //!   final frame: all three retrievers reported, and a filter chain whose
 //!   counts are a monotonically non-increasing funnel
 //!   (`before >= after_type >= … >= after_limit`). A trace that skips a stage

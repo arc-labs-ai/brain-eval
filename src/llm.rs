@@ -9,7 +9,7 @@
 //! built-in default. Compiled only under the `live-llm` feature (it pulls
 //! in `reqwest`).
 //!
-//! [`LlmClient::complete`] retries transient failures (5xx / 429 / network)
+//! [`crate::llm::LlmClient::complete`] retries transient failures (5xx / 429 / network)
 //! and fails fast on 4xx (bad key, no credit, unknown model), returning the
 //! error message so the caller can fall back to its non-LLM path and
 //! surface the reason.
@@ -50,7 +50,7 @@ impl LlmClient {
     /// Build from the single shared credential `BRAIN__LLM__API_KEY`, or
     /// `None` if it is unset. The model resolves from `model_override_env`
     /// (e.g. `BRAIN_EVAL_JUDGE_MODEL`) first, then the shared
-    /// `BRAIN__LLM__MODEL`, then [`DEFAULT_MODEL`]; the provider is derived
+    /// `BRAIN__LLM__MODEL`, then the private `DEFAULT_MODEL`; the provider is derived
     /// from the resolved model id.
     #[must_use]
     pub fn from_env(model_override_env: &str) -> Option<Self> {
