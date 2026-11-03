@@ -176,10 +176,11 @@ jobs:
       - name: Require the LLM credential
         run: |
           if [ -z "${BRAIN__LLM__API_KEY}" ]; then
-            echo "::error::BRAIN_LLM_API_KEY secret is not set. Brain cannot boot \
-          without an LLM provider key (write-time HyPE is mandatory), so every \
-          live acceptance gate would fail on a config error. Set the secret in \
-          repo settings, or skip the live job."
+            echo "::error::BRAIN_LLM_API_KEY secret is not set. The CI broker \
+          serves it to every namespace Brain resolves, and write-time HyPE is \
+          mandatory, so every live acceptance gate would fail once a write \
+          needed a credential. Set the secret in repo settings, or skip the \
+          live job."
             exit 1
           fi
           # The provider is derived from the MODEL id, not from the key, and
@@ -207,10 +208,47 @@ jobs:
           BRAIN__LLM__API_KEY: ${{ secrets.BRAIN_LLM_API_KEY }}
           BRAIN__LLM__MODEL: ${{ vars.BRAIN_LLM_MODEL }}
 
+      # Brain resolves an LLM credential per namespace and refuses to boot
+      # without `[llm.broker]` — a process-wide `[llm] api_key` is not a
+      # substitute. In production that broker is the Arc gateway; CI has one
+      # shared key and no control plane, so this stands in for it.
+      #
+      # This is what the live tier was missing. Every one of its 21 gates died
+      # in under half a second on `config error: invalid config:
+      # `[llm.broker]` is missing`, which read as 21 test failures and was one
+      # configuration gap.
+      #
+      # Bound on 0.0.0.0 and reached from inside each brain container through
+      # the `host.docker.internal:host-gateway` mapping the harness now adds.
+      - name: Start the CI LLM broker
+        working-directory: brain-eval
+        env:
+          BROKER_SERVICE_KEY: brain-eval-ci-broker
+          BROKER_MODEL: ${{ vars.BRAIN_LLM_MODEL }}
+          BROKER_LLM_API_KEY: ${{ secrets.BRAIN_LLM_API_KEY }}
+          BROKER_LISTEN: 0.0.0.0:9099
+        run: |
+          nohup python3 scripts/ci-llm-broker.py > "${RUNNER_TEMP}/broker.log" 2>&1 &
+          for _ in $(seq 1 25); do
+            if curl -fsS -m 2 -H "authorization: Bearer brain-eval-ci-broker" \
+                 http://127.0.0.1:9099/llm/ns/preflight/resolve >/dev/null 2>&1; then
+              echo "broker is serving"; cat "${RUNNER_TEMP}/broker.log"; exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::the CI LLM broker did not start"
+          cat "${RUNNER_TEMP}/broker.log" || true
+          exit 1
+
       - name: Live acceptance gates
         working-directory: brain-eval
         env:
           BRAIN_EVAL_IMAGE_TAG: latest
+          # Brain resolves per namespace through the broker above. The URL is
+          # ordinary config; the service key is Brain's identity to the broker
+          # and rides the same 0600 env-file as the provider key.
+          BRAIN__LLM__BROKER__URL: http://host.docker.internal:9099
+          BRAIN__LLM__BROKER__SERVICE_KEY: brain-eval-ci-broker
           # Forwarded by the harness into the container via a 0600 env-file;
           # it never lands in a `docker run` argv.
           BRAIN__LLM__API_KEY: ${{ secrets.BRAIN_LLM_API_KEY }}
@@ -221,6 +259,14 @@ jobs:
         # The `live` profile pins test-threads=1 (each test boots its own
         # container). --run-ignored ignored-only selects exactly the live tests.
         run: cargo nextest run --release --profile live --run-ignored ignored-only --no-capture
+
+      - name: Stop the CI LLM broker
+        if: always()
+        run: |
+          pkill -f ci-llm-broker.py || true
+          # On a failure the broker's log says whether Brain ever resolved,
+          # which separates "the broker was wrong" from "the test was".
+          cat "${RUNNER_TEMP}/broker.log" || true
 
       - name: Clean up docker
         if: always()
