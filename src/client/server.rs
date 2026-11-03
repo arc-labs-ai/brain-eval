@@ -360,17 +360,47 @@ impl ServerHandle {
         // `BRAIN__LLM__BROKER__URL` at it and `BRAIN__LLM__BROKER__SERVICE_KEY`
         // is Brain's own identity to it — not a provider key.
         //
-        // `BRAIN__LLM__API_KEY` is still forwarded when set. It is read by the
-        // shard-wide fallback rather than the per-namespace path, so it is
-        // additive to the broker and not a replacement for it.
+        // `BRAIN__LLM__API_KEY` is deliberately NOT forwarded when a broker is
+        // configured, and that is not an optimisation — forwarding it breaks
+        // the boot.
         //
-        // Both secrets ride a 0600 temp env-file (see `SecretEnvFile`) rather
-        // than `-e`, so neither lands in this process's argv.
+        // Brain's own config says of `[llm] api_key`: "Not the serving
+        // credential: every namespace resolves its own key through
+        // `[llm.broker]`. This one is read only by the shard-wide consumers
+        // that still hold a process-wide client. Setting it does not make a
+        // keyless namespace work." So it buys nothing here.
+        //
+        // What it costs is a hard failure. `preflight_llm_auth` makes a
+        // 1-token completion at boot *only when the key is present* —
+        // otherwise it returns `Skipped` — and a rejected key is
+        // `refusing to start`. Forwarding a key the provider will not accept
+        // therefore turns every live gate into a boot failure, which is
+        // exactly what the first run after the broker landed produced:
+        //
+        //     LLM credential rejected — refusing to start … provider
+        //     `anthropic` rejected the [llm] api_key
+        //
+        // The broker holds the real credential and proxies completions, so
+        // the server never needs one of its own.
+        //
+        // The service key rides a 0600 temp env-file (see `SecretEnvFile`)
+        // rather than `-e`, so it never lands in this process's argv.
+        let broker_configured = std::env::var("BRAIN__LLM__BROKER__URL")
+            .map(|v| !v.is_empty())
+            .unwrap_or(false);
         let mut secret_env: Vec<(String, String)> = Vec::new();
-        for key in ["BRAIN__LLM__API_KEY", "BRAIN__LLM__BROKER__SERVICE_KEY"] {
+        let forwarded: &[&str] = if broker_configured {
+            &["BRAIN__LLM__BROKER__SERVICE_KEY"]
+        } else {
+            // No broker: the server will refuse to boot on config validation
+            // regardless, but forward the key so the failure is about the
+            // missing broker rather than a second missing thing.
+            &["BRAIN__LLM__API_KEY", "BRAIN__LLM__BROKER__SERVICE_KEY"]
+        };
+        for key in forwarded {
             if let Ok(v) = std::env::var(key) {
                 if !v.is_empty() {
-                    secret_env.push((key.to_string(), v));
+                    secret_env.push(((*key).to_string(), v));
                 }
             }
         }
