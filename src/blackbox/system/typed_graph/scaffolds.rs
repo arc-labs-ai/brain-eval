@@ -9,7 +9,7 @@
 //!   storage, well-formed responses, the spec-grounded direction of a
 //!   transition), and
 //! - records the *flagged*, behaviour-dependent observation via
-//!   [`ScenarioOutcome::advisory`], which prints but never fails the acceptance
+//!   `ScenarioOutcome::advisory`, which prints but never fails the acceptance
 //!   gate.
 //!
 //! Run them live to turn each advisory observation into a real gate:

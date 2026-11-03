@@ -60,11 +60,37 @@ jobs:
         working-directory: brain-eval
         run: cargo clippy --all-targets -- -D warnings
 
+      # docs.rs is where a reader meets this crate and no job invoked rustdoc,
+      # so nothing noticed when its links rotted — eight warnings had
+      # accumulated. The levels are `#![deny(rustdoc::all)]` in `src/lib.rs`,
+      # beside the crate's other lint attributes; this step is the invocation,
+      # without which those levels cannot fire.
+      - name: Docs (rustdoc links resolve)
+        working-directory: brain-eval
+        run: cargo doc --no-deps --all-features
+
       - name: Test (no-server)
         working-directory: brain-eval
         run: |
           cargo nextest run
           cargo test --doc
+
+      # Nothing audited dependencies. This crate mints data-plane keys and
+      # talks to a real server, and the sibling SDK, MCP and edge repos all
+      # gate this; here it was the one missing check.
+      #
+      # `cargo audit` exits non-zero on a *vulnerability* and only warns on
+      # `unsound`/`unmaintained`, which is what is wanted: the tree carries two
+      # unsoundness warnings (anyhow's `Error::downcast_mut` and tokio's
+      # `AsyncFd::new`) that no released version fixes yet, and failing on them
+      # would mean pinning the gate open from day one.
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+      - name: Audit dependencies
+        working-directory: brain-eval
+        run: cargo audit
 
   # Live tier: build the brain-server image, provision the models, and run
   # the full-stack acceptance / scenario / soak / regression gates against

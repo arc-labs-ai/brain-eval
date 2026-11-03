@@ -18,7 +18,7 @@
 //! | Module        | What it is                                        |
 //! |---------------|----------------------------------------------------|
 //! | [`client`]    | Shared adapter layer: connects to and drives a `brain-server` (auth, harness, metrics, the Docker-managed server handle). Used by both surfaces below. |
-//! | [`bench`]     | Surface (A): per-question dataset benchmarking — datasets, scoring, reporting, run orchestration. |
+//! | [`mod@bench`] | Surface (A): per-question dataset benchmarking — datasets, scoring, reporting, run orchestration. |
 //! | [`blackbox`]  | Surface (B): whole-server black-box suites — scale/load, durability + chaos scenarios, the v1.0 acceptance gate, long-running soak. |
 //! | [`llm`] (feature `live-llm`) | Shared LLM HTTP client backing the `live-llm` judge + answer synthesis. |
 //!
@@ -42,6 +42,16 @@
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
+// docs.rs is where a reader meets this crate, and nothing was checking it:
+// eight warnings had accumulated — four links to private items (which rustdoc
+// renders as no link at all), two real links missing their path, and two names
+// that are ambiguous because a module and a macro share them. Denying the whole
+// group is affordable because the group is clean, measured with
+// `-W rustdoc::all` rather than assumed. Declared here beside the other lint
+// attributes rather than as a `[lints]` table, to keep one mechanism in this
+// crate; CI supplies the `cargo doc` invocation, without which these levels
+// cannot fire at all.
+#![deny(rustdoc::all)]
 #![allow(clippy::module_name_repetitions)]
 
 pub mod bench;

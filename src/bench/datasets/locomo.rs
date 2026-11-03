@@ -13,7 +13,7 @@
 //! ~1540 questions.
 //!
 //! We expand one sample into many [`EvalInstance`]s sharing the
-//! same `conversation_id` so [`crate::runner::EvalRunner`] ingests
+//! same `conversation_id` so [`crate::bench::runner::EvalRunner`] ingests
 //! the conversation once and queries it per-question.
 //!
 //! ## Categories

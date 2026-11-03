@@ -34,7 +34,7 @@ pub fn metrics_addr_from_env(data_plane: SocketAddr) -> SocketAddr {
     SocketAddr::new(data_plane.ip(), port)
 }
 
-/// A parsed `/metrics` scrape — one [`Sample`] per exposition line.
+/// A parsed `/metrics` scrape — one private `Sample` per exposition line.
 #[derive(Debug, Clone, Default)]
 pub struct PrometheusMetrics {
     samples: Vec<Sample>,
