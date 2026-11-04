@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.1.3](https://github.com/arc-labs-ai/brain-eval/compare/v0.1.2...v0.1.3) (2026-11-04)
+
+
+### Fixes
+
+* **deps:** take brain-db-sdk 0.4, which is what the server speaks ([#13](https://github.com/arc-labs-ai/brain-eval/issues/13)) ([edd9711](https://github.com/arc-labs-ai/brain-eval/commit/edd9711b26d3ed4caa82896c2374c5fcd68c6d6a))
+* **live:** resolve credentials through a broker, so the live tier can boot ([#10](https://github.com/arc-labs-ai/brain-eval/issues/10)) ([4872463](https://github.com/arc-labs-ai/brain-eval/commit/4872463eac174d39c4320f3e1bcd4b983e322a92))
+* **live:** stop forwarding the shard-wide key, which refuses the boot ([#11](https://github.com/arc-labs-ai/brain-eval/issues/11)) ([8a65a81](https://github.com/arc-labs-ai/brain-eval/commit/8a65a81d66b4f34c9b331bdbde9561a2f56dd7e7))
+
 ## [0.1.2](https://github.com/arc-labs-ai/brain-eval/compare/v0.1.1...v0.1.2) (2026-10-21)
 
 
