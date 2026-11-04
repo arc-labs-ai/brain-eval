@@ -27,23 +27,28 @@
         },
         {
           "type": "test",
-          "section": "Tests and verification"
+          "section": "Tests and verification",
+          "hidden": true
         },
         {
           "type": "review",
-          "section": "Tests and verification"
+          "section": "Tests and verification",
+          "hidden": true
         },
         {
           "type": "build",
-          "section": "Build and tooling"
+          "section": "Build and tooling",
+          "hidden": true
         },
         {
           "type": "ci",
-          "section": "Build and tooling"
+          "section": "Build and tooling",
+          "hidden": true
         },
         {
           "type": "docs",
-          "section": "Documentation"
+          "section": "Documentation",
+          "hidden": true
         },
         {
           "type": "chore",
