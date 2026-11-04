@@ -150,6 +150,7 @@ async fn run(endpoint: SocketAddr) -> Result<ScenarioOutcome, HarnessError> {
             new_canonical_name: new_name.clone(),
             move_to_alias: true,
             request_id: new_id(),
+            act_as: None,
         })
         .await?;
     if renamed.entity.entity_id != id {

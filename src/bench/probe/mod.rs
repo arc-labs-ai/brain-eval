@@ -301,6 +301,7 @@ async fn probe_read(client: &BrainClient) -> Result<bool, ProbeError> {
     let trace = client
         .query_trace(&QueryTraceRequest {
             query: query_request(READ_QUESTION),
+            act_as: None,
         })
         .await?;
     rows.push(StageRow::info(

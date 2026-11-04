@@ -286,6 +286,7 @@ async fn focus_read(
     let tr = client
         .query_trace(&QueryTraceRequest {
             query: query_request(&inst.question),
+            act_as: None,
         })
         .await?;
     println!("  ── server per-stage trace ──");

@@ -40,7 +40,7 @@ live-llm = []
 # repo split.
 #
 # We depend on the PUBLISHED crate from crates.io, with no
-# `[patch.crates-io]` override: brain-db-sdk 0.2.0 is published, so this
+# `[patch.crates-io]` override: brain-db-sdk 0.4.x is published, so this
 # repo builds standalone from a bare clone with no sibling checkout
 # required. brain-eval's only SDK-family dependency is brain-db-sdk itself
 # (no brain-edge), so there is no second consumer whose resolution would
@@ -56,7 +56,7 @@ live-llm = []
 # ----------------------------------------------------------------------------
 
 [dependencies]
-brain-db-sdk = "0.2"
+brain-db-sdk = "0.4"
 
 tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "macros", "signal", "time", "sync", "process"] }
 serde = { version = "1", features = ["derive"] }

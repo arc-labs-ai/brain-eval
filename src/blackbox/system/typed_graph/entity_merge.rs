@@ -90,6 +90,7 @@ async fn run(endpoint: SocketAddr) -> Result<ScenarioOutcome, HarnessError> {
             confidence: 0.95,
             reason: "eval merge/unmerge scenario".to_string(),
             request_id: new_id(),
+            act_as: None,
         })
         .await?;
 
@@ -137,6 +138,7 @@ async fn run(endpoint: SocketAddr) -> Result<ScenarioOutcome, HarnessError> {
         .unmerge_entity(&EntityUnmergeRequest {
             merged_entity: merged,
             request_id: new_id(),
+            act_as: None,
         })
         .await?;
     if restored.restored_entity_id != merged {

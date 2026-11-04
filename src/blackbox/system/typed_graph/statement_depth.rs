@@ -74,6 +74,7 @@ async fn run(endpoint: SocketAddr) -> Result<ScenarioOutcome, HarnessError> {
             reason: 2,
             reason_message: "eval tombstone".to_string(),
             request_id: new_id(),
+            act_as: None,
         })
         .await?;
 
@@ -120,6 +121,7 @@ async fn run(endpoint: SocketAddr) -> Result<ScenarioOutcome, HarnessError> {
             reason: 2,
             reason_message: "eval retract".to_string(),
             request_id: new_id(),
+            act_as: None,
         })
         .await?;
     if retracted.retracted_at_unix_nanos == 0 {
@@ -153,6 +155,7 @@ async fn run(endpoint: SocketAddr) -> Result<ScenarioOutcome, HarnessError> {
             include_tombstoned: true,
             limit: 1000,
             cursor: Vec::new(),
+            act_as: None,
         })
         .await?;
     let has_v1 = history.iter().any(|s| s.statement_id == v1);

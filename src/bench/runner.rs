@@ -933,6 +933,7 @@ impl EvalRunner {
     ) -> Option<PlanTrace> {
         let req = QueryTraceRequest {
             query: trace_query_request(&instance.question, self.config.max_results),
+            act_as: None,
         };
         match harness.client().query_trace(&req).await {
             Ok(resp) => Some(PlanTrace::from_wire(&resp)),

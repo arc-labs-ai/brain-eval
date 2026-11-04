@@ -459,7 +459,10 @@ async fn run_delegated_txn(endpoint: SocketAddr) -> Result<ScenarioOutcome, Harn
     let h = BrainEvalHarness::connect_with_token(endpoint, svc_space, token).await?;
     let delegated = ActAs {
         namespace: delegated_ns,
-        space_id: delegated_space,
+        // 0.4 renamed this and changed its meaning: `space` is a structured,
+        // opaque selector the server derives the 16-byte storage id from at
+        // ingress, not a pre-derived id. The value here was already a string.
+        space: delegated_space,
         grant: 0,
     };
 
@@ -600,7 +603,11 @@ pub(crate) async fn durable_active_memory_ids(
             for item in &frame.items {
                 // state 0 = active.
                 if item.state == 0 && item.text.contains(marker) {
-                    present.insert(u128::from_be_bytes(item.memory_id));
+                    // `WireMemoryId` is a `u128` in 0.4; it was `[u8; 16]` in 0.2. That change
+                    // is what produced "invalid length 9, expected a byte array of
+                    // length 16" against a HEAD server — CBOR encodes a small u128 in
+                    // nine bytes and the old client demanded a 16-byte string.
+                    present.insert(item.memory_id);
                 }
             }
             last_cursor = frame.next_cursor.clone();
